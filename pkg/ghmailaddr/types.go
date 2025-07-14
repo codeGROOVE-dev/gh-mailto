@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"sync"
 )
 
 // Address represents an email address found for a GitHub user.
@@ -37,22 +38,23 @@ type Option func(*Lookup)
 
 // WithLogger returns an Option that sets a custom logger for the Lookup instance.
 func WithLogger(logger *slog.Logger) Option {
-	return func(l *Lookup) {
-		l.logger = logger
+	return func(lu *Lookup) {
+		lu.logger = logger
 	}
 }
+
 
 // New creates a new Lookup instance with the given GitHub token.
 // The token should have appropriate permissions to access organization data.
 func New(token string, opts ...Option) *Lookup {
-	l := &Lookup{
+	lu := &Lookup{
 		token:  token,
 		logger: slog.Default(),
 	}
 	for _, opt := range opts {
-		opt(l)
+		opt(lu)
 	}
-	return l
+	return lu
 }
 
 // addressAccumulator helps accumulate unique addresses with their discovery methods.
@@ -116,8 +118,8 @@ func (a *addressAccumulator) toSlice() []Address {
 }
 
 // Lookup performs email address lookup for the given GitHub username within an organization.
-func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Result, error) {
-	l.logger.Info("looking up email addresses",
+func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*Result, error) {
+	lu.logger.Info("looking up email addresses",
 		"username", username,
 		"organization", organization,
 	)
@@ -127,30 +129,68 @@ func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Re
 		// Addresses will be nil if no addresses found, which is fine
 	}
 
-	// Define lookup methods
-	methods := []func(context.Context, string, string) ([]Address, error){
-		l.lookupViaPublicAPI,
-		l.lookupViaCommits,
-		l.lookupViaSAMLIdentity,
-		l.lookupViaOrgVerifiedDomains,
-		l.lookupViaOrgMembers,
+	// Define lookup methods with names
+	type methodInfo struct {
+		name string
+		fn   func(context.Context, string, string) ([]Address, error)
+	}
+	
+	methods := []methodInfo{
+		{"Public API", lu.lookupViaPublicAPI},
+		{"Git Commits", lu.lookupViaCommits},
+		{"SAML Identity", lu.lookupViaSAMLIdentity},
+		{"Org Verified Domains", lu.lookupViaOrgVerifiedDomains},
+		{"Org Members API", lu.lookupViaOrgMembers},
 	}
 
 	accumulator := newAddressAccumulator()
+	
+	// Execute methods in parallel
+	type methodResult struct {
+		name      string
+		addresses []Address
+		err       error
+	}
+	
+	resultChan := make(chan methodResult, len(methods))
+	var wg sync.WaitGroup
+	
 	for _, method := range methods {
-		addresses, err := method(ctx, username, organization)
-		if err != nil {
-			l.logger.Error("lookup method failed", "error", err)
+		wg.Add(1)
+		go func(m methodInfo) {
+			defer wg.Done()
+			addresses, err := m.fn(ctx, username, organization)
+			resultChan <- methodResult{
+				name:      m.name,
+				addresses: addresses,
+				err:       err,
+			}
+		}(method)
+	}
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	for result := range resultChan {
+		if result.err != nil {
+			lu.logger.Warn("lookup method failed",
+				"method", result.name,
+				"error", result.err,
+				"username", username,
+				"organization", organization,
+			)
 			continue
 		}
-		for _, addr := range addresses {
+		for _, addr := range result.addresses {
 			accumulator.add(addr)
 		}
 	}
 
 	result.Addresses = accumulator.toSlice()
 
-	l.logger.Info("lookup completed",
+	lu.logger.Info("lookup completed",
 		"username", username,
 		"addressesFound", len(result.Addresses),
 	)
