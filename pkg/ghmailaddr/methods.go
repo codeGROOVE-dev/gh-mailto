@@ -38,7 +38,7 @@ func (l *Lookup) lookupViaPublicAPI(ctx context.Context, username, _ string) ([]
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
 	var user struct {
@@ -87,7 +87,7 @@ func (l *Lookup) lookupViaCommits(ctx context.Context, username, organization st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
 	var searchResult struct {

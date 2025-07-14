@@ -8,34 +8,42 @@ import (
 
 // Address represents an email address found for a GitHub user.
 type Address struct {
-	Email    string
+	// Email is the email address.
+	Email string
+	// Verified indicates whether the email address has been verified by GitHub.
 	Verified bool
-	Methods  []string // Sorted list of discovery methods
+	// Methods contains the sorted list of discovery methods that found this address.
+	Methods []string
 }
 
 // Result contains the email addresses found for a GitHub user.
 type Result struct {
-	Username  string
+	// Username is the GitHub username that was searched.
+	Username string
+	// Addresses contains all discovered email addresses.
 	Addresses []Address
 }
 
-// Lookup provides email address lookup for GitHub users.
+// Lookup provides email address discovery for GitHub users within an organization.
+// It uses multiple methods to find email addresses including public API data,
+// commit history, SAML identities, and organization member information.
 type Lookup struct {
 	token  string
 	logger *slog.Logger
 }
 
-// Option configures a Lookup.
+// Option configures a Lookup instance.
 type Option func(*Lookup)
 
-// WithLogger sets a custom logger.
+// WithLogger returns an Option that sets a custom logger for the Lookup instance.
 func WithLogger(logger *slog.Logger) Option {
 	return func(l *Lookup) {
 		l.logger = logger
 	}
 }
 
-// New creates a new Lookup instance.
+// New creates a new Lookup instance with the given GitHub token.
+// The token should have appropriate permissions to access organization data.
 func New(token string, opts ...Option) *Lookup {
 	l := &Lookup{
 		token:  token,
@@ -47,6 +55,66 @@ func New(token string, opts ...Option) *Lookup {
 	return l
 }
 
+// addressAccumulator helps accumulate unique addresses with their discovery methods.
+// It deduplicates addresses by email and tracks all methods that discovered each address.
+type addressAccumulator struct {
+	addresses map[string]*Address
+	methodSet map[string]map[string]struct{} // email -> set of methods
+}
+
+func newAddressAccumulator() *addressAccumulator {
+	return &addressAccumulator{
+		addresses: make(map[string]*Address),
+		methodSet: make(map[string]map[string]struct{}),
+	}
+}
+
+// add merges an address into the accumulator.
+// If the email already exists:
+//   - The verified flag is upgraded to true if any method reports it as verified
+//   - The discovery method is added to the set of methods for this address
+func (a *addressAccumulator) add(addr Address) {
+	email := addr.Email
+	method := addr.Methods[0] // New addresses come with single method
+	
+	if existing, ok := a.addresses[email]; ok {
+		// Once an address is verified by any method, it stays verified
+		if addr.Verified {
+			existing.Verified = true
+		}
+		// Track this discovery method
+		if _, exists := a.methodSet[email][method]; !exists {
+			a.methodSet[email][method] = struct{}{}
+		}
+	} else {
+		// First time seeing this email
+		a.addresses[email] = &Address{
+			Email:    email,
+			Verified: addr.Verified,
+			Methods:  []string{}, // Will be populated from methodSet
+		}
+		a.methodSet[email] = map[string]struct{}{
+			method: {},
+		}
+	}
+}
+
+// toSlice converts the accumulated addresses to a slice with sorted method lists
+func (a *addressAccumulator) toSlice() []Address {
+	result := make([]Address, 0, len(a.addresses))
+	for email, addr := range a.addresses {
+		// Convert method set to sorted slice
+		methods := make([]string, 0, len(a.methodSet[email]))
+		for method := range a.methodSet[email] {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+		addr.Methods = methods
+		result = append(result, *addr)
+	}
+	return result
+}
+
 // Lookup performs email address lookup for the given GitHub username within an organization.
 func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Result, error) {
 	l.logger.Info("looking up email addresses",
@@ -55,8 +123,8 @@ func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Re
 	)
 
 	result := &Result{
-		Username:  username,
-		Addresses: []Address{},
+		Username: username,
+		// Addresses will be nil if no addresses found, which is fine
 	}
 
 	// Define lookup methods
@@ -68,7 +136,7 @@ func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Re
 		l.lookupViaOrgMembers,
 	}
 
-	addressMap := make(map[string]*Address)
+	accumulator := newAddressAccumulator()
 	for _, method := range methods {
 		addresses, err := method(ctx, username, organization)
 		if err != nil {
@@ -76,42 +144,11 @@ func (l *Lookup) Lookup(ctx context.Context, username, organization string) (*Re
 			continue
 		}
 		for _, addr := range addresses {
-			if existing, ok := addressMap[addr.Email]; ok {
-				// Keep the verified flag if any method found it verified
-				if addr.Verified {
-					existing.Verified = true
-				}
-				// Append the method if not already present
-				methodExists := false
-				for _, m := range existing.Methods {
-					if m == addr.Methods[0] {
-						methodExists = true
-						break
-					}
-				}
-				if !methodExists {
-					existing.Methods = append(existing.Methods, addr.Methods[0])
-				}
-			} else {
-				// Create new address entry
-				addressMap[addr.Email] = &Address{
-					Email:    addr.Email,
-					Verified: addr.Verified,
-					Methods:  []string{addr.Methods[0]},
-				}
-			}
+			accumulator.add(addr)
 		}
 	}
 
-	// Convert map to slice and sort methods
-	for _, addr := range addressMap {
-		// Sort methods alphabetically
-		sortedMethods := make([]string, len(addr.Methods))
-		copy(sortedMethods, addr.Methods)
-		sort.Strings(sortedMethods)
-		addr.Methods = sortedMethods
-		result.Addresses = append(result.Addresses, *addr)
-	}
+	result.Addresses = accumulator.toSlice()
 
 	l.logger.Info("lookup completed",
 		"username", username,
