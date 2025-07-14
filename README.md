@@ -1,8 +1,8 @@
 # gh2addrs
 
-Find email addresses for GitHub users within your organization.
+Find email addresses for GitHub users via multiple methods
 
-> **Note**: Requires organization-level permissions. Not useful for spam/stalking.
+> **Note**: Requires organization-level permissions to be useful. Not helpful for spam/stalking.
 
 ## Install
 
@@ -18,7 +18,7 @@ go install github.com/ready-to-review/gh2addrs/cmd/gh2addrs@latest
 # Uses 'gh auth token' automatically
 gh2addrs --user octocat --org github
 
-# Show discovery methods  
+# Show discovery methods
 gh2addrs --user octocat --org github -v
 
 # JSON output
@@ -34,7 +34,7 @@ lookup := ghmailaddr.New(token)
 result, err := lookup.Lookup(ctx, "octocat", "github")
 
 for _, addr := range result.Addresses {
-    fmt.Printf("%s (verified: %v) via %v\n", 
+    fmt.Printf("%s (verified: %v) via %v\n",
         addr.Email, addr.Verified, addr.Methods)
 }
 ```
@@ -51,8 +51,8 @@ for _, addr := range result.Addresses {
 
 - Go 1.21+
 - GitHub token with `read:user`, `repo`, `read:org` scopes
-- Optional: `admin:org` for SAML access
+- Optional: `read:org` for SAML access
 
 ## License
 
-MIT
+Apache 2.0
