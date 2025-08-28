@@ -3,6 +3,7 @@ package ghmailaddr
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -14,6 +15,9 @@ const (
 	methodSAMLIdentity = "saml_identity"
 	methodOrgDomains   = "org_verified_domains"
 	methodOrgMembers   = "org_members"
+
+	// usernameKey is the common key for username in GraphQL variables.
+	usernameKey = "username"
 )
 
 // lookupViaPublicAPI uses the GitHub REST API to find public email addresses.
@@ -23,7 +27,7 @@ func (lu *Lookup) lookupViaPublicAPI(ctx context.Context, username, _ string) ([
 	var user struct {
 		Email string `json:"email"`
 	}
-	
+
 	url := fmt.Sprintf("https://api.github.com/users/%s", username)
 	if err := lu.doJSONRequest(ctx, "GET", url, nil, &user); err != nil {
 		return nil, fmt.Errorf("fetching user data: %w", err)
@@ -53,15 +57,15 @@ func (lu *Lookup) lookupViaCommits(ctx context.Context, username, organization s
 	)
 
 	// Search for repos in the organization
-	searchURL := fmt.Sprintf("https://api.github.com/search/repositories?q=org:%s&sort=updated&per_page=%d", 
+	searchURL := fmt.Sprintf("https://api.github.com/search/repositories?q=org:%s&sort=updated&per_page=%d",
 		organization, maxReposToSearch)
-	
+
 	var searchResult struct {
 		Items []struct {
 			Name string `json:"name"`
 		} `json:"items"`
 	}
-	
+
 	if err := lu.doJSONRequest(ctx, "GET", searchURL, nil, &searchResult); err != nil {
 		return nil, fmt.Errorf("searching repositories: %w", err)
 	}
@@ -81,7 +85,7 @@ func (lu *Lookup) lookupViaCommits(ctx context.Context, username, organization s
 				} `json:"author"`
 			} `json:"commit"`
 		}
-		
+
 		if err := lu.doJSONRequest(ctx, "GET", commitsURL, nil, &commits); err != nil {
 			lu.logger.Debug("failed to fetch commits",
 				"repo", repo.Name,
@@ -133,7 +137,7 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 							Login string
 						}
 						SamlIdentity struct {
-							NameId string
+							NameID string
 						}
 					}
 				} `graphql:"externalIdentities(first: $limit, login: $username)"`
@@ -141,10 +145,10 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 		} `graphql:"organization(login: $org)"`
 	}
 
-	variables := map[string]interface{}{
-		"org":      githubv4.String(organization),
-		"username": githubv4.String(username),
-		"limit":    githubv4.Int(maxSAMLIdentities),
+	variables := map[string]any{
+		"org":       githubv4.String(organization),
+		usernameKey: githubv4.String(username),
+		"limit":     githubv4.Int(maxSAMLIdentities),
 	}
 
 	err := client.Query(ctx, &query, variables)
@@ -154,14 +158,14 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 
 	var addresses []Address
 	for _, node := range query.Organization.SamlIdentityProvider.ExternalIdentities.Nodes {
-		if node.User.Login == username && isValidEmail(node.SamlIdentity.NameId) {
+		if node.User.Login == username && isValidEmail(node.SamlIdentity.NameID) {
 			addresses = append(addresses, Address{
-				Email:    node.SamlIdentity.NameId,
+				Email:    node.SamlIdentity.NameID,
 				Verified: true,
 				Methods:  []string{methodSAMLIdentity},
 			})
 			lu.logger.Debug("found address via SAML identity",
-				"address", node.SamlIdentity.NameId,
+				"address", node.SamlIdentity.NameID,
 				"verified", true,
 			)
 		}
@@ -189,9 +193,9 @@ func (lu *Lookup) lookupViaOrgVerifiedDomains(ctx context.Context, username, org
 		} `graphql:"user(login: $username)"`
 	}
 
-	variables := map[string]interface{}{
-		"username": githubv4.String(username),
-		"org":      githubv4.String(organization),
+	variables := map[string]any{
+		usernameKey: githubv4.String(username),
+		"org":       githubv4.String(organization),
 	}
 
 	err := client.Query(ctx, &query, variables)
@@ -231,10 +235,10 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 	if err != nil {
 		return nil, fmt.Errorf("checking membership: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close() //nolint:errcheck // Best effort cleanup
 
 	// If user is not a member, skip
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, nil
 	}
 
@@ -244,7 +248,7 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 		Login string `json:"login"`
 		Email string `json:"email"`
 	}
-	
+
 	if err := lu.doJSONRequest(ctx, "GET", membersURL, nil, &members); err != nil {
 		return nil, fmt.Errorf("fetching members: %w", err)
 	}
@@ -266,4 +270,3 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 
 	return addresses, nil
 }
-

@@ -32,3 +32,5 @@ Thumbs.db
 # Binary
 gh2addrs
 cmd/gh2addrs/gh2addrs
+# added by lint-install
+out/

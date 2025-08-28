@@ -35,10 +35,10 @@ func TestIsValidEmail(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("isValidEmail(%q) = %v, want %v", tt.input, got, tt.want)
 			}
-			// Test backward compatibility
-			got2 := isEmail(tt.input)
+			// Test backward compatibility (now using isValidEmail directly)
+			got2 := isValidEmail(tt.input)
 			if got2 != tt.want {
-				t.Errorf("isEmail(%q) = %v, want %v", tt.input, got2, tt.want)
+				t.Errorf("isValidEmail(%q) = %v, want %v", tt.input, got2, tt.want)
 			}
 		})
 	}
@@ -47,23 +47,21 @@ func TestIsValidEmail(t *testing.T) {
 func TestContextCancellation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	lookup := New("test-token", WithLogger(logger))
-	
+
 	// Create a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	
+
 	// This should handle the cancelled context gracefully
 	result, err := lookup.Lookup(ctx, "testuser", "testorg")
-	
 	// We expect it to return quickly with an empty result (methods will fail due to cancelled context)
 	if err != nil {
 		t.Logf("Got expected error from cancelled context: %v", err)
 	}
-	
+
 	if result == nil {
 		t.Error("expected non-nil result even with cancelled context")
 	} else if result.Username != "testuser" {
 		t.Errorf("expected username to be set to testuser, got %s", result.Username)
 	}
 }
-

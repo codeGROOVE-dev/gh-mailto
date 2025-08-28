@@ -11,10 +11,10 @@ import (
 type Address struct {
 	// Email is the email address.
 	Email string
-	// Verified indicates whether the email address has been verified by GitHub.
-	Verified bool
 	// Methods contains the sorted list of discovery methods that found this address.
 	Methods []string
+	// Verified indicates whether the email address has been verified by GitHub.
+	Verified bool
 }
 
 // Result contains the email addresses found for a GitHub user.
@@ -29,8 +29,8 @@ type Result struct {
 // It uses multiple methods to find email addresses including public API data,
 // commit history, SAML identities, and organization member information.
 type Lookup struct {
-	token  string
 	logger *slog.Logger
+	token  string
 }
 
 // Option configures a Lookup instance.
@@ -42,7 +42,6 @@ func WithLogger(logger *slog.Logger) Option {
 		lu.logger = logger
 	}
 }
-
 
 // New creates a new Lookup instance with the given GitHub token.
 // The token should have appropriate permissions to access organization data.
@@ -64,13 +63,6 @@ type addressAccumulator struct {
 	methodSet map[string]map[string]struct{} // email -> set of methods
 }
 
-func newAddressAccumulator() *addressAccumulator {
-	return &addressAccumulator{
-		addresses: make(map[string]*Address),
-		methodSet: make(map[string]map[string]struct{}),
-	}
-}
-
 // add merges an address into the accumulator.
 // If the email already exists:
 //   - The verified flag is upgraded to true if any method reports it as verified
@@ -78,7 +70,7 @@ func newAddressAccumulator() *addressAccumulator {
 func (a *addressAccumulator) add(addr Address) {
 	email := addr.Email
 	method := addr.Methods[0] // New addresses come with single method
-	
+
 	if existing, ok := a.addresses[email]; ok {
 		// Once an address is verified by any method, it stays verified
 		if addr.Verified {
@@ -101,7 +93,7 @@ func (a *addressAccumulator) add(addr Address) {
 	}
 }
 
-// toSlice converts the accumulated addresses to a slice with sorted method lists
+// toSlice converts the accumulated addresses to a slice with sorted method lists.
 func (a *addressAccumulator) toSlice() []Address {
 	result := make([]Address, 0, len(a.addresses))
 	for email, addr := range a.addresses {
@@ -131,30 +123,33 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 
 	// Define lookup methods with names
 	type methodInfo struct {
-		name string
 		fn   func(context.Context, string, string) ([]Address, error)
-	}
-	
-	methods := []methodInfo{
-		{"Public API", lu.lookupViaPublicAPI},
-		{"Git Commits", lu.lookupViaCommits},
-		{"SAML Identity", lu.lookupViaSAMLIdentity},
-		{"Org Verified Domains", lu.lookupViaOrgVerifiedDomains},
-		{"Org Members API", lu.lookupViaOrgMembers},
+		name string
 	}
 
-	accumulator := newAddressAccumulator()
-	
+	methods := []methodInfo{
+		{lu.lookupViaPublicAPI, "Public API"},
+		{lu.lookupViaCommits, "Git Commits"},
+		{lu.lookupViaSAMLIdentity, "SAML Identity"},
+		{lu.lookupViaOrgVerifiedDomains, "Org Verified Domains"},
+		{lu.lookupViaOrgMembers, "Org Members API"},
+	}
+
+	accumulator := &addressAccumulator{
+		addresses: make(map[string]*Address),
+		methodSet: make(map[string]map[string]struct{}),
+	}
+
 	// Execute methods in parallel
-	type methodResult struct {
-		name      string
+	type methodResult struct { //nolint:govet // Local struct, field alignment not critical
 		addresses []Address
+		name      string
 		err       error
 	}
-	
+
 	resultChan := make(chan methodResult, len(methods))
 	var wg sync.WaitGroup
-	
+
 	for _, method := range methods {
 		wg.Add(1)
 		go func(m methodInfo) {
@@ -167,12 +162,12 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 			}
 		}(method)
 	}
-	
+
 	go func() {
 		wg.Wait()
 		close(resultChan)
 	}()
-	
+
 	for result := range resultChan {
 		if result.err != nil {
 			lu.logger.Warn("lookup method failed",
