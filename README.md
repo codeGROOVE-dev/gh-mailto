@@ -1,58 +1,67 @@
 # gh-mailto
 
-Find email addresses for GitHub users via multiple methods
+A command-line tool and Go library for discovering email addresses associated with GitHub users within organizations. It combines multiple discovery methods to find both verified and unverified email addresses.
 
-**NOTE**: GitHub onlys return verified e-mail addresses within an Enterprise org, and only if you have permissions to see them. This library will use that data if available, and
-unverified sources if that data is unavailable.
+GitHub only returns verified email addresses within Enterprise organizations when you have appropriate permissions. This tool uses that verified data when available and supplements it with additional discovery methods when needed.
 
-## Install
+## Installation
 
 ```bash
 go install github.com/codeGROOVE-dev/gh-mailto/cmd/gh-mailto@latest
+gh auth login  # GitHub CLI authentication required
 ```
 
 ## Usage
 
-### CLI
-
+Find all email addresses for a user in an organization:
 ```bash
-# Uses 'gh auth token' automatically
-gh-mailto --user octocat --org github
-
-# Show discovery methods
-gh-mailto --user octocat --org github -v
-
-# JSON output
-gh-mailto --user octocat --org github --json
+gh-mailto --user username --org organization
 ```
 
-### Library
+Filter to a specific domain and generate intelligent guesses:
+```bash
+gh-mailto --user username --org organization --domain example.com --guess
+```
+
+Normalize addresses and show detailed discovery methods:
+```bash
+gh-mailto --user username --org organization --normalize --verbose
+```
+
+### Go Library
 
 ```go
-import "github.com/codeGROOVE-dev/gh-mailto/pkg/gh-mailto"
+import ghmailto "github.com/codeGROOVE-dev/gh-mailto/pkg/gh-mailto"
 
-lookup := ghmailto.New(token)
-result, err := lookup.Lookup(ctx, "octocat", "github")
+lookup := ghmailto.New(githubToken)
+result, err := lookup.Lookup(ctx, "username", "organization")
 
 for _, addr := range result.Addresses {
-    fmt.Printf("%s (verified: %v) via %v\n",
+    fmt.Printf("%s (verified: %t, methods: %v)\n",
         addr.Email, addr.Verified, addr.Methods)
 }
+
+// optionally generate domain-specific guesses
+guesses, err := lookup.Guess(ctx, "username", "organization",
+    ghmailto.GuessOptions{Domain: "example.com"})
 ```
 
 ## Discovery Methods
 
-- Public profile email
-- Git commit history
-- SAML identity (verified)
-- Organization verified domains
-- Organization member API
+The tool runs multiple discovery methods in parallel, prioritizing verified sources over unverified ones:
+
+**Verified:** SAML identity providers (Enterprise), organization verified domain emails
+**Unverified:** Public profiles, git commit history, organization member API data
+
+## Email Guessing (optional)
+
+The (optional) "guess" feature analyzes discovered patterns and generates intelligent guesses for the target domain using common corporate formats like firstname.lastname@domain.com and variations.
 
 ## Requirements
 
-- Go 1.21+
-- GitHub token with `read:user`, `repo`, `read:org` scopes
-- Optional: `read:org` for SAML access
+- Go 1.24 or later
+- GitHub CLI authenticated (`gh auth login`)
+- Token permissions: `read:user` and `read:org` (additional org permissions enable more methods)
 
 ## License
 
