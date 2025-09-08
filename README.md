@@ -1,8 +1,14 @@
 # gh-mailto
 
-A command-line tool and Go library for discovering email addresses associated with GitHub users within organizations. It combines multiple discovery methods to find both verified and unverified email addresses.
+![logo](media/logo-small.png)
+
+Discovers email addresses associated with GitHub users within an organizations. It combines multiple discovery methods to find both verified and unverified email addresses.
+
+## Limitations
 
 GitHub only returns verified email addresses within Enterprise organizations when you have appropriate permissions. This tool uses that verified data when available and supplements it with additional discovery methods when needed.
+
+This library isn't really going to help you spam users, sorry.
 
 ## Installation
 
