@@ -1,4 +1,4 @@
-package ghmailaddr
+package ghmailto
 
 // Hard-coded configuration values.
 const (

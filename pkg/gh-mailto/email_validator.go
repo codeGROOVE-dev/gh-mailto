@@ -1,4 +1,4 @@
-package ghmailaddr
+package ghmailto
 
 import (
 	"net/mail"

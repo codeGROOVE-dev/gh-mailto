@@ -1,9 +1,10 @@
-package ghmailaddr
+package ghmailto
 
 import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -191,4 +192,88 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 	)
 
 	return result, nil
+}
+
+// FilterOptions contains options for filtering and normalizing email addresses.
+type FilterOptions struct {
+	// Domain filters results to only include addresses with this domain.
+	// If empty, no domain filtering is applied.
+	Domain string
+	// Normalize determines whether to normalize email addresses by
+	// removing +suffix from the user part and converting to lowercase.
+	Normalize bool
+}
+
+// FilterAndNormalize filters and normalizes the addresses in a Result based on options.
+func (r *Result) FilterAndNormalize(opts FilterOptions) *Result {
+	if r == nil {
+		return nil
+	}
+
+	// Use accumulator to handle deduplication after normalization
+	accumulator := &addressAccumulator{
+		addresses: make(map[string]*Address),
+		methodSet: make(map[string]map[string]struct{}),
+	}
+
+	for _, addr := range r.Addresses {
+		email := addr.Email
+
+		// Normalize email if requested
+		if opts.Normalize {
+			email = normalizeEmail(email)
+		}
+
+		// Filter by domain if specified
+		if opts.Domain != "" {
+			emailDomain := extractDomain(email)
+			if !strings.EqualFold(emailDomain, opts.Domain) {
+				continue
+			}
+		}
+
+		// Create normalized address and add to accumulator for deduplication
+		normalizedAddr := Address{
+			Email:    email,
+			Methods:  addr.Methods,
+			Verified: addr.Verified,
+		}
+		accumulator.add(normalizedAddr)
+	}
+
+	return &Result{
+		Username:  r.Username,
+		Addresses: accumulator.toSlice(),
+	}
+}
+
+// normalizeEmail normalizes an email address by removing +suffix and making it lowercase.
+func normalizeEmail(email string) string {
+	// Convert to lowercase
+	email = strings.ToLower(email)
+
+	// Split on @ to separate user and domain parts
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return email // Invalid email, return as-is
+	}
+
+	user := parts[0]
+	domain := parts[1]
+
+	// Remove +suffix from user part
+	if plusIndex := strings.Index(user, "+"); plusIndex >= 0 {
+		user = user[:plusIndex]
+	}
+
+	return user + "@" + domain
+}
+
+// extractDomain extracts the domain part from an email address.
+func extractDomain(email string) string {
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
 }

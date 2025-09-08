@@ -1,4 +1,4 @@
-# gh2addrs
+# gh-mailto
 
 Find email addresses for GitHub users via multiple methods
 
@@ -7,7 +7,7 @@ Find email addresses for GitHub users via multiple methods
 ## Install
 
 ```bash
-go install github.com/ready-to-review/gh2addrs/cmd/gh2addrs@latest
+go install github.com/codeGROOVE-dev/gh-mailto/cmd/gh-mailto@latest
 ```
 
 ## Usage
@@ -16,21 +16,21 @@ go install github.com/ready-to-review/gh2addrs/cmd/gh2addrs@latest
 
 ```bash
 # Uses 'gh auth token' automatically
-gh2addrs --user octocat --org github
+gh-mailto --user octocat --org github
 
 # Show discovery methods
-gh2addrs --user octocat --org github -v
+gh-mailto --user octocat --org github -v
 
 # JSON output
-gh2addrs --user octocat --org github --json
+gh-mailto --user octocat --org github --json
 ```
 
 ### Library
 
 ```go
-import "github.com/ready-to-review/gh2addrs/pkg/ghmailaddr"
+import "github.com/codeGROOVE-dev/gh-mailto/pkg/gh-mailto"
 
-lookup := ghmailaddr.New(token)
+lookup := ghmailto.New(token)
 result, err := lookup.Lookup(ctx, "octocat", "github")
 
 for _, addr := range result.Addresses {

@@ -1,5 +1,5 @@
-// Package ghmailaddr provides email address discovery for GitHub users.
-package ghmailaddr
+// Package ghmailto provides email address discovery for GitHub users.
+package ghmailto
 
 import (
 	"context"
@@ -26,7 +26,7 @@ func (lu *Lookup) doRequest(ctx context.Context, method, url string, body io.Rea
 
 	req.Header.Set("Authorization", "Bearer "+lu.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "gh2addrs/1.0")
+	req.Header.Set("User-Agent", "gh-mailto/1.0")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

@@ -1,4 +1,4 @@
-module github.com/ready-to-review/gh2addrs
+module github.com/codeGROOVE-dev/gh-mailto
 
 go 1.23.0
 
