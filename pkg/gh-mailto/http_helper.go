@@ -19,13 +19,18 @@ var httpClient = &http.Client{
 
 // doRequest performs an HTTP request with proper error handling and resource cleanup.
 func (lu *Lookup) doRequest(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
+	return lu.doRequestWithAccept(ctx, method, url, body, "application/vnd.github.v3+json")
+}
+
+// doRequestWithAccept performs an HTTP request with a custom Accept header.
+func (lu *Lookup) doRequestWithAccept(ctx context.Context, method, url string, body io.Reader, accept string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+lu.token)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", "gh-mailto/1.0")
 
 	resp, err := httpClient.Do(req)
@@ -37,10 +42,13 @@ func (lu *Lookup) doRequest(ctx context.Context, method, url string, body io.Rea
 }
 
 // doJSONRequest performs an HTTP request and decodes the JSON response.
-//
-//nolint:unparam // method parameter kept for future flexibility
 func (lu *Lookup) doJSONRequest(ctx context.Context, method, url string, body io.Reader, result any) error {
-	resp, err := lu.doRequest(ctx, method, url, body)
+	return lu.doJSONRequestWithAccept(ctx, method, url, body, result, "application/vnd.github.v3+json")
+}
+
+// doJSONRequestWithAccept performs an HTTP request with custom Accept header and decodes the JSON response.
+func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url string, body io.Reader, result any, accept string) error {
+	resp, err := lu.doRequestWithAccept(ctx, method, url, body, accept)
 	if err != nil {
 		return err
 	}
@@ -59,7 +67,21 @@ func (lu *Lookup) doJSONRequest(ctx context.Context, method, url string, body io
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+	// Read the entire response body for logging
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %w", err)
+	}
+
+	// Log the raw response
+	lu.logger.Debug("raw API response",
+		"method", method,
+		"url", url,
+		"status", resp.StatusCode,
+		"response", string(bodyBytes),
+	)
+
+	if err := json.Unmarshal(bodyBytes, result); err != nil {
 		return fmt.Errorf("decoding response: %w", err)
 	}
 

@@ -2,7 +2,8 @@
 
 Find email addresses for GitHub users via multiple methods
 
-> **Note**: Requires organization-level permissions to be useful. Not helpful for spam/stalking.
+**NOTE**: GitHub onlys return verified e-mail addresses within an Enterprise org, and only if you have permissions to see them. This library will use that data if available, and
+unverified sources if that data is unavailable.
 
 ## Install
 

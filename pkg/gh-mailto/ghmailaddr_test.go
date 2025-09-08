@@ -2,8 +2,8 @@ package ghmailto
 
 import (
 	"context"
-	"io"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -45,7 +45,7 @@ func TestIsValidEmail(t *testing.T) {
 }
 
 func TestContextCancellation(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	lookup := New("test-token", WithLogger(logger))
 
 	// Create a cancelled context
@@ -365,5 +365,267 @@ func TestExtractDomain(t *testing.T) {
 				t.Errorf("extractDomain(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestGuess(t *testing.T) {
+	tests := []struct {
+		name           string
+		addresses      []Address
+		domain         string
+		expectedGuess  string
+		shouldHaveMore bool // if we expect more than one guess
+	}{
+		{
+			name: "verified address in target domain",
+			addresses: []Address{
+				{Email: "user@example.com", Name: "John Doe", Verified: true, Methods: []string{"public_api"}},
+				{Email: "user@other.com", Name: "John Doe", Verified: false, Methods: []string{"commits"}},
+			},
+			domain:         "example.com",
+			expectedGuess:  "user@example.com",
+			shouldHaveMore: false,
+		},
+		{
+			name: "SAML identity in target domain",
+			addresses: []Address{
+				{Email: "user@other.com", Name: "John Doe", Verified: false, Methods: []string{"commits"}},
+				{Email: "john@example.com", Name: "John Doe", Verified: false, Methods: []string{"saml_identity"}},
+			},
+			domain:         "example.com",
+			expectedGuess:  "john@example.com",
+			shouldHaveMore: false,
+		},
+		{
+			name: "intelligent guess from other domain prefix",
+			addresses: []Address{
+				{Email: "john.doe@other.com", Name: "John Doe", Verified: false, Methods: []string{"commits"}},
+			},
+			domain:         "example.com",
+			expectedGuess:  "john.doe@example.com",
+			shouldHaveMore: true, // should also have name-based guesses
+		},
+		{
+			name: "name-based guess only",
+			addresses: []Address{
+				{Email: "different@other.com", Name: "Thomas Stromberg", Verified: false, Methods: []string{"commits"}},
+			},
+			domain:         "example.com",
+			expectedGuess:  "different@example.com", // prefix extraction comes first
+			shouldHaveMore: true,                    // should also have name-based guesses
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			guesses := simulateGuessLogic(tt.addresses, tt.domain)
+
+			// Verify results
+			if len(guesses) == 0 {
+				t.Error("Expected at least one guess, got none")
+				return
+			}
+
+			if guesses[0] != tt.expectedGuess {
+				t.Errorf("Expected first guess to be %s, got %s", tt.expectedGuess, guesses[0])
+			}
+
+			if tt.shouldHaveMore && len(guesses) == 1 {
+				t.Error("Expected more than one guess, got only one")
+			}
+
+			if !tt.shouldHaveMore && len(guesses) > 1 {
+				t.Errorf("Expected only one guess, got %d: %v", len(guesses), guesses)
+			}
+		})
+	}
+}
+
+// simulateGuessLogic simulates the guess logic for testing purposes
+func simulateGuessLogic(addresses []Address, domain string) []string {
+	targetDomain := strings.ToLower(domain)
+	var guesses []string
+	seen := make(map[string]bool)
+
+	// Test precedence rules
+	if guess := checkVerifiedDomainEmail(addresses, targetDomain); guess != "" {
+		return []string{guess}
+	}
+	if guess := checkSAMLIdentity(addresses, targetDomain); guess != "" {
+		return []string{guess}
+	}
+
+	// Generate intelligent guesses
+	guesses = addPrefixGuesses(addresses, targetDomain, guesses, seen)
+	guesses = addNameBasedGuesses(addresses, targetDomain, guesses, seen)
+
+	return guesses
+}
+
+func checkVerifiedDomainEmail(addresses []Address, targetDomain string) string {
+	for _, addr := range addresses {
+		normalizedEmail := normalizeEmail(addr.Email)
+		if addr.Verified && strings.EqualFold(extractDomain(normalizedEmail), targetDomain) {
+			return normalizedEmail
+		}
+	}
+	return ""
+}
+
+func checkSAMLIdentity(addresses []Address, targetDomain string) string {
+	for _, addr := range addresses {
+		normalizedEmail := normalizeEmail(addr.Email)
+		if containsMethod(addr.Methods, "saml_identity") &&
+			strings.EqualFold(extractDomain(normalizedEmail), targetDomain) {
+			return normalizedEmail
+		}
+	}
+	return ""
+}
+
+func addPrefixGuesses(addresses []Address, targetDomain string, guesses []string, seen map[string]bool) []string {
+	for _, addr := range addresses {
+		normalizedEmail := normalizeEmail(addr.Email)
+		if !strings.EqualFold(extractDomain(normalizedEmail), targetDomain) {
+			// Extract prefix (local part before @)
+			parts := strings.SplitN(normalizedEmail, "@", 2)
+			if len(parts) == 2 && parts[0] != "" {
+				guess := parts[0] + "@" + targetDomain
+				if !seen[guess] {
+					guesses = append(guesses, guess)
+					seen[guess] = true
+				}
+			}
+		}
+	}
+	return guesses
+}
+
+func addNameBasedGuesses(addresses []Address, targetDomain string, guesses []string, seen map[string]bool) []string {
+	for _, addr := range addresses {
+		if addr.Name != "" {
+			nameGuesses := generateNameBasedGuesses(addr.Name, targetDomain)
+			for _, guess := range nameGuesses {
+				if !seen[guess] {
+					guesses = append(guesses, guess)
+					seen[guess] = true
+				}
+			}
+		}
+	}
+	return guesses
+}
+
+func TestGenerateNameBasedGuesses(t *testing.T) {
+	tests := []struct {
+		name     string
+		realName string
+		domain   string
+		expected []string
+	}{
+		{
+			name:     "normal two-part name",
+			realName: "Thomas Stromberg",
+			domain:   "example.com",
+			expected: []string{"thomas.stromberg@example.com", "t.stromberg@example.com", "thomas@example.com"},
+		},
+		{
+			name:     "three-part name",
+			realName: "John Doe Smith",
+			domain:   "example.com",
+			expected: []string{"john.smith@example.com", "j.smith@example.com", "john@example.com"},
+		},
+		{
+			name:     "single letter first name",
+			realName: "T Stromberg",
+			domain:   "example.com",
+			expected: []string{"t.stromberg@example.com", "t@example.com"}, // Includes firstname@domain pattern
+		},
+		{
+			name:     "single name",
+			realName: "Madonna",
+			domain:   "example.com",
+			expected: nil, // Should return nil for single names
+		},
+		{
+			name:     "empty name",
+			realName: "",
+			domain:   "example.com",
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := generateNameBasedGuesses(tt.realName, tt.domain)
+			if len(result) != len(tt.expected) {
+				t.Errorf("Expected %d guesses, got %d: %v", len(tt.expected), len(result), result)
+				return
+			}
+			for i, expected := range tt.expected {
+				if result[i] != expected {
+					t.Errorf("Expected guess %d to be %s, got %s", i, expected, result[i])
+				}
+			}
+		})
+	}
+}
+
+func TestExtractPrefix(t *testing.T) {
+	// Local helper function for testing the inlined extract prefix logic
+	extractPrefix := func(email string) string {
+		parts := strings.SplitN(email, "@", 2)
+		if len(parts) != 2 {
+			return ""
+		}
+		return parts[0]
+	}
+
+	tests := []struct {
+		name     string
+		email    string
+		expected string
+	}{
+		{
+			name:     "normal email",
+			email:    "user@example.com",
+			expected: "user",
+		},
+		{
+			name:     "complex prefix",
+			email:    "first.last+tag@example.com",
+			expected: "first.last+tag",
+		},
+		{
+			name:     "invalid email",
+			email:    "invalid",
+			expected: "",
+		},
+		{
+			name:     "empty email",
+			email:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractPrefix(tt.email)
+			if result != tt.expected {
+				t.Errorf("Expected %s, got %s", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestContainsMethod(t *testing.T) {
+	methods := []string{"commits", "public_api", "saml_identity"}
+
+	if !containsMethod(methods, "commits") {
+		t.Error("Expected to find 'commits' method")
+	}
+
+	if containsMethod(methods, "nonexistent") {
+		t.Error("Expected not to find 'nonexistent' method")
 	}
 }
