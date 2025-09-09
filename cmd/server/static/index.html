@@ -553,6 +553,26 @@
                 margin-top: 12px;
             }
 
+            .low-confidence-warning {
+                background: #fff3e0;
+                border: 1px solid #ffcc80;
+                border-radius: 8px;
+                padding: 16px 20px;
+                margin-bottom: 24px;
+                color: #e65100;
+                text-align: center;
+                font-weight: 500;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+            }
+
+            .low-confidence-warning::before {
+                content: "⚠️";
+                font-size: 18px;
+            }
+
             .footer {
                 padding: 32px;
                 text-align: center;
@@ -697,6 +717,11 @@
 
             {{if .Results}}
             <div class="results">
+                {{if .LowConfidenceWarning}}
+                <div class="low-confidence-warning">
+                    No high confidence addresses found, showing all possibilities:
+                </div>
+                {{end}}
                 {{if .Guess}}
                 <h2>
                     Wild Guesses
@@ -713,9 +738,7 @@
                         </div>
                         {{if $guess.Sources}}
                         <div class="email-pattern">
-                            Based on {{range $method, $rawEmail :=
-                            $guess.Sources}}{{$method}}{{if ne $rawEmail
-                            $guess.Email}} ({{$rawEmail}}){{end}}{{end}}
+                            Based on {{formatSources $guess.Sources}}
                         </div>
                         {{end}}
                     </div>

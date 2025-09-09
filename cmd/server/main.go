@@ -100,15 +100,16 @@ func (c *Cache) Stats() (size, maxSize, hits int) {
 }
 
 type PageData struct { //nolint:govet // struct alignment acceptable for web interface data
-	CacheSize    int
-	CacheMaxSize int
-	CacheHits    int
-	Username     string
-	Domain       string
-	Error        string
-	Guess        bool
-	CacheHit     bool
-	Results      any
+	CacheSize            int
+	CacheMaxSize         int
+	CacheHits            int
+	Username             string
+	Domain               string
+	Error                string
+	Guess                bool
+	CacheHit             bool
+	Results              any
+	LowConfidenceWarning bool
 }
 
 var (
@@ -168,6 +169,25 @@ func main() {
 				formattedMethods = append(formattedMethods, methodName)
 			}
 			return strings.Join(formattedMethods, ", ")
+		},
+		"formatSources": func(sources map[string]string) string {
+			var sourceList []string
+
+			// Collect all available sources in consistent order
+			if sourceEmail, exists := sources["source_email"]; exists {
+				sourceList = append(sourceList, sourceEmail)
+			}
+			if sourceName, exists := sources["source_name"]; exists {
+				sourceList = append(sourceList, sourceName)
+			}
+			if sourceUsername, exists := sources["source_username"]; exists {
+				sourceList = append(sourceList, sourceUsername)
+			}
+
+			if len(sourceList) > 0 {
+				return strings.Join(sourceList, ", ")
+			}
+			return ""
 		},
 	}).Parse(htmlTemplate))
 
@@ -293,13 +313,15 @@ func handlePostRequest(request *http.Request, logger *slog.Logger) PageData {
 			data.Error = fmt.Sprintf("Guess failed: %v", err)
 		} else {
 			// Filter high-confidence results for guesses
-			filteredGuesses := filterHighConfidenceAddresses(guessResult.Guesses)
+			filteredGuesses, showWarning1 := filterHighConfidenceAddresses(guessResult.Guesses)
 			guessResult.Guesses = filteredGuesses
 
 			// Also filter found addresses if any
-			filteredFound := filterHighConfidenceAddresses(guessResult.FoundAddresses)
+			filteredFound, showWarning2 := filterHighConfidenceAddresses(guessResult.FoundAddresses)
 			guessResult.FoundAddresses = filteredFound
 
+			// Show warning if either set shows low-confidence results
+			data.LowConfidenceWarning = showWarning1 || showWarning2
 			data.Results = guessResult
 		}
 	} else {
@@ -313,8 +335,9 @@ func handlePostRequest(request *http.Request, logger *slog.Logger) PageData {
 			})
 
 			// Filter high-confidence results
-			filteredAddresses := filterHighConfidenceAddresses(filteredResult.Addresses)
+			filteredAddresses, showWarning := filterHighConfidenceAddresses(filteredResult.Addresses)
 			filteredResult.Addresses = filteredAddresses
+			data.LowConfidenceWarning = showWarning
 
 			data.Results = filteredResult
 		}
@@ -348,8 +371,8 @@ func getGHToken(ctx context.Context) (string, error) {
 }
 
 // filterHighConfidenceAddresses filters results to show only high-confidence ones (>60%)
-// if any exist, otherwise returns all results.
-func filterHighConfidenceAddresses(addresses []ghmailto.Address) []ghmailto.Address {
+// if any exist, otherwise returns all results and a flag indicating if filtering occurred.
+func filterHighConfidenceAddresses(addresses []ghmailto.Address) ([]ghmailto.Address, bool) {
 	// Check if any addresses have confidence > 60%
 	hasHighConfidence := false
 	for _, addr := range addresses {
@@ -367,9 +390,9 @@ func filterHighConfidenceAddresses(addresses []ghmailto.Address) []ghmailto.Addr
 				filtered = append(filtered, addr)
 			}
 		}
-		return filtered
+		return filtered, false // false = no warning needed, showing high confidence results
 	}
 
-	// Otherwise, return all results
-	return addresses
+	// Otherwise, return all results with warning flag
+	return addresses, len(addresses) > 0 // true = show warning if we have results but none are high confidence
 }

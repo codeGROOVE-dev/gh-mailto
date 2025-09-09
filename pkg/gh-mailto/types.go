@@ -72,6 +72,16 @@ func WithLogger(logger *slog.Logger) Option {
 // Cannot start or end with hyphen, cannot have consecutive hyphens, max 39 characters.
 var githubUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
+// Confidence levels for different validation techniques.
+const (
+	ConfidenceValidatedOrg = 100 // Validated org address (official verification)
+	ConfidenceSAML         = 99  // SAML identity (enterprise auth)
+	ConfidenceCommits      = 95  // Git commits (direct authorship)
+	ConfidencePRs          = 90  // Pull requests (authored content)
+	ConfidenceIssues       = 85  // Issues (authored content)
+	ConfidenceComments     = 80  // Comments (user participation)
+)
+
 // validateGitHubUsername validates a GitHub username for security.
 func validateGitHubUsername(username string) error {
 	if username == "" {
@@ -621,9 +631,9 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 }
 
 // generateIntelligentGuesses creates email guesses based on existing patterns and user info.
-func (*Lookup) generateIntelligentGuesses(_ context.Context, username string, addresses []Address, targetDomain string) []Address {
-	var guesses []Address
-	seen := make(map[string]bool)
+func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string, addresses []Address, targetDomain string) []Address {
+	// Track guesses by email to combine confidence scores and sources
+	guessMap := make(map[string]*Address)
 
 	// Track addresses we already found to avoid duplicating them as guesses
 	foundEmails := make(map[string]bool)
@@ -631,20 +641,60 @@ func (*Lookup) generateIntelligentGuesses(_ context.Context, username string, ad
 		foundEmails[strings.ToLower(addr.Email)] = true
 	}
 
+	// Helper function to add or combine guesses
+	addGuess := func(email string, confidence int, pattern string, sources map[string]string) {
+		if foundEmails[strings.ToLower(email)] {
+			lu.logger.Debug("skipping guess, email already found via GitHub search",
+				"email", email, "pattern", pattern, "confidence", confidence)
+			return // Skip if we already found this email
+		}
+
+		if existing, exists := guessMap[email]; exists {
+			// Combine confidence scores (additive, capped at 100)
+			oldConfidence := existing.Confidence
+			combinedConfidence := existing.Confidence + confidence
+			if combinedConfidence > 100 {
+				combinedConfidence = 100
+			}
+			existing.Confidence = combinedConfidence
+
+			lu.logger.Debug("combining guess scores",
+				"email", email, "old_confidence", oldConfidence,
+				"new_contribution", confidence, "combined_confidence", combinedConfidence,
+				"old_pattern", existing.Pattern, "new_pattern", pattern)
+
+			// Combine patterns
+			existing.Pattern = existing.Pattern + "+" + pattern
+
+			// Merge sources
+			if existing.Sources == nil {
+				existing.Sources = make(map[string]string)
+			}
+			for key, value := range sources {
+				existing.Sources[key] = value
+			}
+		} else {
+			// New guess
+			lu.logger.Debug("adding new guess",
+				"email", email, "confidence", confidence, "pattern", pattern, "sources", sources)
+			guessMap[email] = &Address{
+				Email:      email,
+				Confidence: confidence,
+				Pattern:    pattern,
+				Sources:    make(map[string]string),
+			}
+			for key, value := range sources {
+				guessMap[email].Sources[key] = value
+			}
+		}
+	}
+
 	// Strategy 1 (HIGHEST PRIORITY): Use GitHub username @ domain (HIGH confidence for exact matches)
 	if username != "" {
 		// Primary: Try the exact username first (highest confidence)
 		if isValidEmailPrefix(username) {
 			guess := username + "@" + targetDomain
-			if !seen[guess] && !foundEmails[strings.ToLower(guess)] {
-				guesses = append(guesses, Address{
-					Email:      guess,
-					Confidence: 40, // Moderate confidence for unvalidated username guess
-					Pattern:    "github_username_exact",
-					Sources:    map[string]string{"source_username": username},
-				})
-				seen[guess] = true
-			}
+			addGuess(guess, 35, "github_username_exact", map[string]string{"source_username": username})
 		}
 
 		// Secondary: If username contains a dash, try the part before the first dash
@@ -652,15 +702,7 @@ func (*Lookup) generateIntelligentGuesses(_ context.Context, username string, ad
 			usernamePrefix := username[:dashIndex]
 			if usernamePrefix != "" && isValidEmailPrefix(usernamePrefix) {
 				guess := usernamePrefix + "@" + targetDomain
-				if !seen[guess] && !foundEmails[strings.ToLower(guess)] {
-					guesses = append(guesses, Address{
-						Email:      guess,
-						Confidence: 25, // Lower confidence for prefix
-						Pattern:    "github_username_prefix",
-						Sources:    map[string]string{"source_username": username},
-					})
-					seen[guess] = true
-				}
+				addGuess(guess, 25, "github_username_prefix", map[string]string{"source_username": username})
 			}
 		}
 	}
@@ -701,28 +743,20 @@ func (*Lookup) generateIntelligentGuesses(_ context.Context, username string, ad
 					continue
 				}
 				guess := prefix + "@" + targetDomain
-				if !seen[guess] && !foundEmails[strings.ToLower(guess)] {
-					guesses = append(guesses, Address{
-						Email:      guess,
-						Confidence: 40,
-						Pattern:    "same_prefix_as_other_domain",
-						Sources:    map[string]string{"source_email": email},
-					})
-					seen[guess] = true
-				}
+				addGuess(guess, 25, "same_prefix_as_other_domain", map[string]string{"source_email": email})
 			}
 		}
 	}
 
 	// Strategy 2 & 3: Use names from addresses (populated by lookup methods)
+	// Deduplicate names to avoid combining the same pattern multiple times
+	seenNames := make(map[string]bool)
 	for _, addr := range addresses {
-		if addr.Name != "" {
+		if addr.Name != "" && !seenNames[addr.Name] {
+			seenNames[addr.Name] = true
 			nameGuesses := generateNameBasedGuesses(addr.Name, targetDomain)
 			for _, guess := range nameGuesses {
-				if !seen[guess.Email] && !foundEmails[strings.ToLower(guess.Email)] {
-					guesses = append(guesses, guess)
-					seen[guess.Email] = true
-				}
+				addGuess(guess.Email, guess.Confidence, guess.Pattern, guess.Sources)
 			}
 		}
 	}
@@ -739,11 +773,14 @@ func (*Lookup) generateIntelligentGuesses(_ context.Context, username string, ad
 
 		smartGuesses := parseUsernameForNames(username, targetDomain, knownNames...)
 		for _, guess := range smartGuesses {
-			if !seen[guess.Email] && !foundEmails[strings.ToLower(guess.Email)] {
-				guesses = append(guesses, guess)
-				seen[guess.Email] = true
-			}
+			addGuess(guess.Email, guess.Confidence, guess.Pattern, guess.Sources)
 		}
+	}
+
+	// Convert guessMap to slice
+	var guesses []Address
+	for _, guess := range guessMap {
+		guesses = append(guesses, *guess)
 	}
 
 	// Sort guesses by confidence score (highest first)
@@ -836,65 +873,65 @@ func generateNameBasedGuesses(realName, domain string) []Address {
 		return nil
 	}
 
-	// firstname.lastname@domain (45% confidence) - most common professional format
+	// firstname.lastname@domain (55% confidence) - most common at tech startups
 	guess1 := firstName + "." + lastName + "@" + domain
 	guesses = append(guesses, Address{
 		Email:      guess1,
-		Confidence: 45,
+		Confidence: 55,
 		Pattern:    "first.last",
 		Sources:    map[string]string{"source_name": realName},
 	})
 
-	// firstnamelastname@domain (40% confidence) - concatenated format
-	guess2 := firstName + lastName + "@" + domain
+	// firstname@domain (45% confidence) - very common for founders/early employees
+	guess4 := firstName + "@" + domain
 	guesses = append(guesses, Address{
-		Email:      guess2,
-		Confidence: 40,
-		Pattern:    "firstlast",
+		Email:      guess4,
+		Confidence: 45,
+		Pattern:    "first",
 		Sources:    map[string]string{"source_name": realName},
 	})
 
-	// firstletterlastname@domain (30% confidence, only if different from above)
+	// firstletterlastname@domain (35% confidence) - common abbreviated format
 	if len(firstName) > 1 {
 		guess3 := string(firstName[0]) + lastName + "@" + domain
 		guesses = append(guesses, Address{
 			Email:      guess3,
-			Confidence: 30,
+			Confidence: 35,
 			Pattern:    "flast",
 			Sources:    map[string]string{"source_name": realName},
 		})
 	}
 
-	// firstname@domain (10% confidence, lower precedence)
-	guess4 := firstName + "@" + domain
-	guesses = append(guesses, Address{
-		Email:      guess4,
-		Confidence: 10,
-		Pattern:    "first",
-		Sources:    map[string]string{"source_name": realName},
-	})
-
-	// lastname@domain (15% confidence) - sometimes companies use just last names
+	// lastname@domain (25% confidence) - occasionally used for distinctive last names
 	if lastName != firstName { // Avoid duplicates for single names
 		guess5 := lastName + "@" + domain
 		guesses = append(guesses, Address{
 			Email:      guess5,
-			Confidence: 15,
+			Confidence: 25,
 			Pattern:    "last",
 			Sources:    map[string]string{"source_name": realName},
 		})
 	}
 
-	// firstinitiallastinitial@domain (15% confidence) - initials format like yp@domain.com
+	// firstinitiallastinitial@domain (20% confidence) - less common but still used
 	if len(firstName) >= 1 && len(lastName) >= 1 {
 		guess6 := string(firstName[0]) + string(lastName[0]) + "@" + domain
 		guesses = append(guesses, Address{
 			Email:      guess6,
-			Confidence: 15,
+			Confidence: 20,
 			Pattern:    "initials",
 			Sources:    map[string]string{"source_name": realName},
 		})
 	}
+
+	// firstnamelastname@domain (15% confidence) - least common, mostly legacy systems
+	guess2 := firstName + lastName + "@" + domain
+	guesses = append(guesses, Address{
+		Email:      guess2,
+		Confidence: 15,
+		Pattern:    "firstlast",
+		Sources:    map[string]string{"source_name": realName},
+	})
 
 	return guesses
 }
@@ -994,9 +1031,9 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 		if validatedGuess.Confidence > 0 {
 			validatedGuesses = append(validatedGuesses, validatedGuess)
 		} else {
-			// Keep original guess with original confidence for potential inclusion
+			// Keep original guess for scaling later (unvalidated guesses will be scaled to 5-20% range)
 			unvalidatedGuesses = append(unvalidatedGuesses, guess)
-			lu.logger.Debug("unvalidated guess kept for potential inclusion", "email", guess.Email, "original_confidence", guess.Confidence)
+			lu.logger.Debug("unvalidated guess kept for scaling", "email", guess.Email, "original_confidence", guess.Confidence)
 		}
 	}
 
@@ -1021,13 +1058,60 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 		return highConfidenceGuesses
 	}
 
-	// Otherwise, return all guesses (validated + unvalidated)
-	allGuesses := append(validatedGuesses, unvalidatedGuesses...)
+	// Otherwise, return all guesses (validated + unvalidated with scaled confidence)
+	scaledUnvalidatedGuesses := lu.scaleUnvalidatedConfidence(unvalidatedGuesses)
+	allGuesses := append(validatedGuesses, scaledUnvalidatedGuesses...)
 	lu.logger.Debug("showing all results (no high-confidence found)",
 		"validated", len(validatedGuesses),
-		"unvalidated", len(unvalidatedGuesses),
+		"unvalidated", len(scaledUnvalidatedGuesses),
 		"total", len(allGuesses))
 	return allGuesses
+}
+
+// scaleUnvalidatedConfidence assigns realistic probability scores to unvalidated guesses
+// based on actual email pattern frequency at tech startups.
+func (lu *Lookup) scaleUnvalidatedConfidence(unvalidatedGuesses []Address) []Address {
+	if len(unvalidatedGuesses) == 0 {
+		return unvalidatedGuesses
+	}
+
+	// Create a copy of the guesses to avoid modifying the original slice
+	scaledGuesses := make([]Address, len(unvalidatedGuesses))
+	copy(scaledGuesses, unvalidatedGuesses)
+
+	// Assign probability scores based on real-world email pattern frequency at tech startups
+	for i := range scaledGuesses {
+		originalConfidence := scaledGuesses[i].Confidence
+		var probabilityScore int
+
+		// Assign scores based on original confidence ordering (higher original = more common pattern)
+		switch originalConfidence {
+		case 55: // firstname.lastname@domain - most common pattern
+			probabilityScore = 35
+		case 45: // firstname@domain - common for founders/small companies
+			probabilityScore = 25
+		case 35: // firstletterlastname@domain - abbreviated format
+			probabilityScore = 20
+		case 25: // lastname@domain - occasionally used
+			probabilityScore = 12
+		case 20: // firstinitiallastinitial@domain - less common
+			probabilityScore = 5
+		case 15: // firstnamelastname@domain - least common, legacy
+			probabilityScore = 3
+		default:
+			// Fallback for any unexpected values
+			probabilityScore = 10
+		}
+
+		lu.logger.Debug("assigning probability score to unvalidated guess",
+			"email", scaledGuesses[i].Email,
+			"original_confidence", originalConfidence,
+			"probability_score", probabilityScore)
+
+		scaledGuesses[i].Confidence = probabilityScore
+	}
+
+	return scaledGuesses
 }
 
 // searchEmailInGitHub searches for an email address in GitHub issues and PRs using GraphQL.
@@ -1106,14 +1190,15 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 		var content, itemType, repoOwner, repoName, itemURL string
 		var number int
 
-		if node.Typename == "Issue" {
+		switch node.Typename {
+		case "Issue":
 			content = node.Issue.Title + " " + node.Issue.Body
 			itemType = "issue"
 			number = node.Issue.Number
 			repoOwner = node.Issue.Repository.Owner.Login
 			repoName = node.Issue.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, number)
-		} else if node.Typename == "PullRequest" {
+		case "PullRequest":
 			content = node.PullRequest.Title + " " + node.PullRequest.Body
 			itemType = "pr"
 			number = node.PullRequest.Number
@@ -1122,8 +1207,85 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/pull/%d", repoOwner, repoName, number)
 		}
 
-		// Case-insensitive search for the email in the content
-		if strings.Contains(strings.ToLower(content), strings.ToLower(guess.Email)) {
+		// Case-insensitive search for the exact email in the content (not substring)
+		// Use word boundaries to avoid matching lewandowski@google.com inside klewandowski@google.com
+		contentLower := strings.ToLower(content)
+		emailLower := strings.ToLower(guess.Email)
+
+		// Look for the email with word boundaries (space, start/end of string, or common delimiters)
+		emailFound := false
+		if contentLower == emailLower {
+			emailFound = true // Exact match
+		} else {
+			// Check for email surrounded by word boundaries
+			for i := 0; i <= len(contentLower)-len(emailLower); i++ {
+				if contentLower[i:i+len(emailLower)] == emailLower {
+					// Check character before (if exists)
+					beforeOK := i == 0 || !isEmailChar(rune(contentLower[i-1]))
+					// Check character after (if exists)
+					afterOK := i+len(emailLower) == len(contentLower) || !isEmailChar(rune(contentLower[i+len(emailLower)]))
+					if beforeOK && afterOK {
+						emailFound = true
+						break
+					}
+				}
+			}
+		}
+
+		if emailFound {
+			// Check if this is a last-name-only email that needs additional validation
+			emailPrefix := strings.Split(guess.Email, "@")[0]
+			isLastNameOnlyEmail := false
+
+			// Check against user's known names to see if this is a last-name-only email
+			for _, name := range lu.currentUserNames {
+				if name == "" {
+					continue
+				}
+				nameParts := strings.Fields(name)
+				if len(nameParts) > 1 {
+					lastName := strings.ToLower(nameParts[len(nameParts)-1])
+					if strings.EqualFold(emailPrefix, lastName) {
+						isLastNameOnlyEmail = true
+
+						// For last-name-only emails, require additional evidence (first name or username)
+						firstName := strings.ToLower(nameParts[0])
+						username := strings.ToLower(lu.currentUsername)
+						contentLower := strings.ToLower(content)
+
+						// Check for exact matches first
+						exactMatch := strings.Contains(contentLower, firstName) || strings.Contains(contentLower, username)
+						nicknameMatch := false
+
+						// Check for nickname/shortened name variations if no exact match
+						if !exactMatch && len(firstName) > 3 {
+							for i := 3; i <= len(firstName); i++ {
+								prefix := firstName[:i]
+								if strings.Contains(contentLower, prefix) {
+									nicknameMatch = true
+									lu.logger.Debug("email validation: last-name-only email validated with nickname context",
+										"email", guess.Email, "last_name", lastName, "first_name", firstName, "prefix", prefix, "username", username,
+										"type", itemType, "number", number, "url", itemURL)
+									break
+								}
+							}
+						}
+
+						if !exactMatch && !nicknameMatch {
+							lu.logger.Debug("email validation: last-name-only email found but no first name/username context",
+								"email", guess.Email, "last_name", lastName, "first_name", firstName, "username", username,
+								"type", itemType, "number", number, "url", itemURL)
+							goto nextNode // Skip this match - not enough context
+						} else if exactMatch {
+							lu.logger.Debug("email validation: last-name-only email validated with exact context",
+								"email", guess.Email, "last_name", lastName, "first_name", firstName, "username", username,
+								"type", itemType, "number", number, "url", itemURL)
+						}
+						break
+					}
+				}
+			}
+
 			if itemType == "issue" {
 				validatedIssueMatches++
 			} else {
@@ -1133,7 +1295,8 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 				"email", guess.Email,
 				"type", itemType,
 				"number", number,
-				"url", itemURL)
+				"url", itemURL,
+				"is_last_name_only", isLastNameOnlyEmail)
 		} else {
 			lu.logger.Debug("email validation: email not found in content",
 				"email", guess.Email,
@@ -1141,6 +1304,7 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 				"number", number,
 				"url", itemURL)
 		}
+	nextNode:
 	}
 
 	// Also search through recent commits we already fetched
@@ -1173,34 +1337,8 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 		"total_matches", totalMatches)
 
 	if totalMatches > 0 {
-		// Apply confidence boost for validation
-		baseConfidence := validatedGuess.Confidence
-		boostAmount := 25        // 25% boost for GitHub validation
-		if baseConfidence < 60 { // Higher boost for low-confidence guesses
-			boostAmount = 35
-		}
-
-		// Special boost for validated username guesses
-		if strings.Contains(validatedGuess.Pattern, "github_username_exact") {
-			boostAmount = 55 // Large boost for validated username guesses (40% -> 95%)
-		}
-
-		// Special boost for validated initials guesses to get above 80% threshold
-		if strings.Contains(validatedGuess.Pattern, "initials") {
-			boostAmount = 66 // Large boost for validated initials (15% -> 81%)
-		}
-
-		newConfidence := baseConfidence + boostAmount
-
-		// Ensure all GitHub-validated guesses reach at least 80% confidence (high-confidence threshold)
-		minValidatedConfidence := 80
-		if newConfidence < minValidatedConfidence {
-			newConfidence = minValidatedConfidence
-		}
-
-		if newConfidence > 95 { // Cap at 95% since it's still a guess
-			newConfidence = 95
-		}
+		// Calculate confidence based on validation methods using standardized values
+		newConfidence := calculateValidationConfidence(validatedIssueMatches, validatedPRMatches, commitMatches)
 
 		validatedGuess.Confidence = newConfidence
 
@@ -1646,11 +1784,12 @@ func (lu *Lookup) extractEmailsFromCommentResults(edges []struct {
 			}
 		}
 
-		if node.Typename == "Issue" {
+		switch node.Typename {
+		case "Issue":
 			itemNumber = node.Issue.Number
 			itemType = "issue"
 			comments = node.Issue.Comments.Nodes
-		} else if node.Typename == "PullRequest" {
+		case "PullRequest":
 			itemNumber = node.PullRequest.Number
 			itemType = "pr"
 			comments = node.PullRequest.Comments.Nodes
@@ -1799,7 +1938,8 @@ func (lu *Lookup) extractDomainEmailsFromContent(edges []struct {
 		var number int
 		var authorLogin string
 
-		if node.Typename == "Issue" {
+		switch node.Typename {
+		case "Issue":
 			content = node.Issue.Title + " " + node.Issue.Body
 			itemType = "issue"
 			number = node.Issue.Number
@@ -1807,7 +1947,7 @@ func (lu *Lookup) extractDomainEmailsFromContent(edges []struct {
 			repoOwner = node.Issue.Repository.Owner.Login
 			repoName = node.Issue.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, number)
-		} else if node.Typename == "PullRequest" {
+		case "PullRequest":
 			content = node.PullRequest.Title + " " + node.PullRequest.Body
 			itemType = "pr"
 			number = node.PullRequest.Number
@@ -2084,4 +2224,44 @@ func parseUsernameForNames(username, targetDomain string, knownNames ...string) 
 	}
 
 	return guesses
+}
+
+// calculateValidationConfidence calculates confidence based on validation methods used.
+func calculateValidationConfidence(issueMatches, prMatches, commitMatches int) int {
+	confidence := 0
+
+	// Add confidence for each validation method found
+	if issueMatches > 0 {
+		confidence += ConfidenceIssues
+	}
+	if prMatches > 0 {
+		confidence += ConfidencePRs
+	}
+	if commitMatches > 0 {
+		confidence += ConfidenceCommits
+	}
+
+	// Cap at 100%
+	if confidence > 100 {
+		confidence = 100
+	}
+
+	return confidence
+}
+
+// isEmailChar returns true if the character is valid in an email address
+// Based on RFC 5322 for email address characters.
+func isEmailChar(c rune) bool {
+	// Letters and digits
+	if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+		return true
+	}
+
+	// Special characters allowed in email addresses (RFC 5322)
+	switch c {
+	case '@', '.', '-', '_', '+', '=', '!', '#', '$', '%', '&', '\'', '*', '/', '?', '^', '`', '{', '|', '}', '~':
+		return true
+	}
+
+	return false
 }

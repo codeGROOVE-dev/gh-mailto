@@ -121,7 +121,7 @@ func run() error {
 
 	// Handle guess mode
 	if *guess {
-		fmt.Fprintf(os.Stderr, "Guessing %s@%s...\n\n", *username, *domain)
+		fmt.Fprintf(os.Stderr, "Hunting for possible e-mail addresses for %s within %s...\n\n", *username, *domain)
 
 		guessResult, err := lookup.Guess(ctx, *username, *org, ghmailto.GuessOptions{
 			Domain: *domain,
@@ -185,35 +185,30 @@ func printResults(result *ghmailto.Result, username, org string) {
 	}
 
 	// Filter results to show only high-confidence ones if any exist above 60%
-	addressesToShow := filterHighConfidenceResults(result.Addresses)
+	addressesToShow, showLowConfidenceWarning := filterHighConfidenceResults(result.Addresses)
+
+	// Show warning if we're displaying low-confidence results
+	if showLowConfidenceWarning {
+		fmt.Printf("%s⚠️  No high confidence addresses found, showing all possibilities:%s\n\n",
+			colorYellow, colorReset)
+	}
 
 	// Display addresses with clean Unix-style formatting
-	for index, addr := range addressesToShow {
-		// Status symbol and confidence
-		var statusSymbol, statusColor string
-		if addr.Verified {
-			statusSymbol = symbolVerified
-			statusColor = colorBrightGreen
+	for _, addr := range addressesToShow {
+		if showLowConfidenceWarning {
+			// Simple bullet format for low-confidence results
+			sourceText := extractSourceText(addr)
+			fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
+				addr.Confidence,
+				colorBold+colorWhite, addr.Email, colorReset,
+				colorDim, sourceText, colorReset)
 		} else {
-			statusSymbol = symbolUnverified
-			statusColor = colorBrightYellow
-		}
-
-		// Confidence visualization
-		confidenceBar := getConfidenceBar(addr.Confidence)
-
-		fmt.Printf("%s%s %s%s%s %s(%d%%)%s\n",
-			statusColor, statusSymbol, colorBold+colorWhite, addr.Email, colorReset,
-			confidenceBar, addr.Confidence, colorReset)
-
-		// Sources with subtle styling
-		sourcesText := formatAddressSourcesModern(addr)
-		if sourcesText != "" {
-			fmt.Printf("  %s%s%s\n", colorDim, sourcesText, colorReset)
-		}
-
-		if index < len(addressesToShow)-1 {
-			fmt.Println()
+			// Use same simple format for high-confidence results
+			sourceText := extractSourceText(addr)
+			fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
+				addr.Confidence,
+				colorBold+colorWhite, addr.Email, colorReset,
+				colorDim, sourceText, colorReset)
 		}
 	}
 	fmt.Println()
@@ -330,6 +325,46 @@ func formatMethodModern(method string) string {
 	}
 }
 
+// extractSourceText extracts a clean source description from an address.
+func extractSourceText(addr ghmailto.Address) string {
+	// Check for pattern-based sources (guesses)
+	if addr.Pattern != "" {
+		var sources []string
+
+		// Collect all available sources
+		if sourceEmail, exists := addr.Sources["source_email"]; exists {
+			sources = append(sources, sourceEmail)
+		}
+		if sourceName, exists := addr.Sources["source_name"]; exists {
+			sources = append(sources, sourceName)
+		}
+		if sourceUsername, exists := addr.Sources["source_username"]; exists {
+			sources = append(sources, sourceUsername)
+		}
+
+		if len(sources) > 0 {
+			return fmt.Sprintf("from %s", strings.Join(sources, ", "))
+		}
+		return fmt.Sprintf("from %s", addr.Pattern)
+	}
+
+	// Check for method-based sources
+	if len(addr.Methods) > 0 {
+		method := addr.Methods[0] // Use first method
+		methodName := formatMethodModern(method)
+
+		// Add organization info if available
+		if strings.Contains(strings.ToLower(method), "commit") {
+			if orgs, hasOrgs := addr.Sources["found_in_orgs"]; hasOrgs && orgs != "" {
+				return fmt.Sprintf("from %s in %s", methodName, orgs)
+			}
+		}
+		return fmt.Sprintf("from %s", methodName)
+	}
+
+	return "unknown source"
+}
+
 // printGuessResults displays the guess results in a formatted manner.
 func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 	// Filter found addresses by domain if specified
@@ -388,58 +423,21 @@ func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 // printUnifiedResults displays all results (guesses + found addresses) sorted by confidence.
 func printUnifiedResults(results []ghmailto.Address) {
 	// Filter results to show only high-confidence ones if any exist above 60%
-	resultsToShow := filterHighConfidenceResults(results)
+	resultsToShow, showLowConfidenceWarning := filterHighConfidenceResults(results)
 
-	for index, result := range resultsToShow {
-		// Determine symbol and color based on whether it's a guess or found address
-		var symbol, symbolColor string
-		switch {
-		case result.Pattern != "":
-			// This is a guess (has pattern)
-			symbol = symbolGuess
-			symbolColor = colorBrightYellow
-		case result.Verified:
-			// This is a verified found address
-			symbol = symbolVerified
-			symbolColor = colorBrightGreen
-		default:
-			// This is an unverified found address
-			symbol = symbolUnverified
-			symbolColor = colorBrightYellow
-		}
+	// Show warning if we're displaying low-confidence results
+	if showLowConfidenceWarning {
+		fmt.Printf("%s⚠️  No high confidence addresses found, showing all possibilities:%s\n\n",
+			colorYellow, colorReset)
+	}
 
-		// Confidence visualization
-		confidenceBar := getConfidenceBar(result.Confidence)
-
-		// Display the result
-		fmt.Printf("%s%s %s%s%s %s(%d%%)%s",
-			symbolColor, symbol, colorBold+colorWhite, result.Email, colorReset,
-			confidenceBar, result.Confidence, colorReset)
-
-		// Show pattern for guesses or method summary for found addresses
-		if result.Pattern != "" {
-			// Show guess pattern with source information if available
-			patternDisplay := result.Pattern
-			if sourceEmail, exists := result.Sources["source_email"]; exists {
-				patternDisplay = fmt.Sprintf("%s (from %s)", result.Pattern, sourceEmail)
-			} else if sourceName, exists := result.Sources["source_name"]; exists {
-				patternDisplay = fmt.Sprintf("%s (from name: %s)", result.Pattern, sourceName)
-			} else if sourceUsername, exists := result.Sources["source_username"]; exists {
-				patternDisplay = fmt.Sprintf("%s (from username: %s)", result.Pattern, sourceUsername)
-			}
-			fmt.Printf(" %s%s%s", colorDim, patternDisplay, colorReset)
-		}
-		fmt.Println()
-
-		// Show sources/methods with subtle styling
-		sourcesText := formatAddressSourcesModern(result)
-		if sourcesText != "" {
-			fmt.Printf("  %s%s%s\n", colorDim, sourcesText, colorReset)
-		}
-
-		if index < len(resultsToShow)-1 {
-			fmt.Println()
-		}
+	// Use same simple format for all results
+	for _, result := range resultsToShow {
+		sourceText := extractSourceText(result)
+		fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
+			result.Confidence,
+			colorBold+colorWhite, result.Email, colorReset,
+			colorDim, sourceText, colorReset)
 	}
 }
 
@@ -449,8 +447,8 @@ func printNoGuessesMessageModern() {
 }
 
 // filterHighConfidenceResults filters results to show only high-confidence ones (>60%)
-// if any exist, otherwise returns all results.
-func filterHighConfidenceResults(addresses []ghmailto.Address) []ghmailto.Address {
+// if any exist, otherwise returns all results and a flag indicating if filtering occurred.
+func filterHighConfidenceResults(addresses []ghmailto.Address) ([]ghmailto.Address, bool) {
 	// Check if any addresses have confidence > 60%
 	hasHighConfidence := false
 	for _, addr := range addresses {
@@ -468,9 +466,9 @@ func filterHighConfidenceResults(addresses []ghmailto.Address) []ghmailto.Addres
 				filtered = append(filtered, addr)
 			}
 		}
-		return filtered
+		return filtered, false // false = no warning needed, showing high confidence results
 	}
 
-	// Otherwise, return all results
-	return addresses
+	// Otherwise, return all results with warning flag
+	return addresses, len(addresses) > 0 // true = show warning if we have results but none are high confidence
 }
