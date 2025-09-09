@@ -22,7 +22,8 @@ func TestIsValidEmail(t *testing.T) {
 		{"invalid - no domain", "user@", false},
 		{"invalid - no TLD", "user@example", false},
 		{"invalid - empty", "", false},
-		{"invalid - noreply", "noreply@github.com", false},
+		{"invalid - generic noreply", "noreply@github.com", false},
+		{"valid - GitHub user noreply", "147884153+golanglemonade@users.noreply.github.com", true},
 		{"invalid - double dots", "user..name@example.com", false},
 		{"invalid - starts with dot", ".user@example.com", false},
 		{"invalid - ends with dot", "user.@example.com", false},
@@ -85,19 +86,8 @@ func TestFilterAndNormalize(t *testing.T) {
 		expected []string // expected email addresses in result
 	}{
 		{
-			name: "no filtering or normalization",
+			name: "no filtering (emails are always normalized)",
 			opts: FilterOptions{},
-			expected: []string{
-				"User.Test+tag@Example.com",
-				"admin@stromberg.org",
-				"John.Doe+Work@STROMBERG.ORG",
-				"contact@other.com",
-				"invalid-email",
-			},
-		},
-		{
-			name: "normalize only",
-			opts: FilterOptions{Normalize: true},
 			expected: []string{
 				"user.test@example.com",
 				"admin@stromberg.org",
@@ -107,24 +97,16 @@ func TestFilterAndNormalize(t *testing.T) {
 			},
 		},
 		{
-			name: "filter by domain only (case insensitive)",
+			name: "filter by domain (case insensitive)",
 			opts: FilterOptions{Domain: "stromberg.org"},
 			expected: []string{
 				"admin@stromberg.org",
-				"John.Doe+Work@STROMBERG.ORG",
+				"john.doe@stromberg.org",
 			},
 		},
 		{
 			name: "filter by domain with different case",
 			opts: FilterOptions{Domain: "STROMBERG.ORG"},
-			expected: []string{
-				"admin@stromberg.org",
-				"John.Doe+Work@STROMBERG.ORG",
-			},
-		},
-		{
-			name: "filter and normalize",
-			opts: FilterOptions{Domain: "stromberg.org", Normalize: true},
 			expected: []string{
 				"admin@stromberg.org",
 				"john.doe@stromberg.org",
@@ -180,7 +162,7 @@ func TestFilterAndNormalize(t *testing.T) {
 
 func TestFilterAndNormalizeNilResult(t *testing.T) {
 	var result *Result
-	opts := FilterOptions{Domain: "example.com", Normalize: true}
+	opts := FilterOptions{Domain: "example.com"}
 
 	filtered := result.FilterAndNormalize(opts)
 	if filtered != nil {
@@ -201,7 +183,7 @@ func TestFilterAndNormalizeDeduplication(t *testing.T) {
 		},
 	}
 
-	opts := FilterOptions{Normalize: true}
+	opts := FilterOptions{}
 	filtered := result.FilterAndNormalize(opts)
 
 	// Should have only 2 unique addresses after normalization: user@example.com and different@example.com
@@ -506,9 +488,9 @@ func addNameBasedGuesses(addresses []Address, targetDomain string, guesses []str
 		if addr.Name != "" {
 			nameGuesses := generateNameBasedGuesses(addr.Name, targetDomain)
 			for _, guess := range nameGuesses {
-				if !seen[guess] {
-					guesses = append(guesses, guess)
-					seen[guess] = true
+				if !seen[guess.Email] {
+					guesses = append(guesses, guess.Email)
+					seen[guess.Email] = true
 				}
 			}
 		}
@@ -527,25 +509,25 @@ func TestGenerateNameBasedGuesses(t *testing.T) {
 			name:     "normal two-part name",
 			realName: "Thomas Stromberg",
 			domain:   "example.com",
-			expected: []string{"thomas.stromberg@example.com", "t.stromberg@example.com", "thomas@example.com"},
+			expected: []string{"thomas.stromberg@example.com", "thomasstromberg@example.com", "tstromberg@example.com", "thomas@example.com", "stromberg@example.com", "ts@example.com"},
 		},
 		{
 			name:     "three-part name",
 			realName: "John Doe Smith",
 			domain:   "example.com",
-			expected: []string{"john.smith@example.com", "j.smith@example.com", "john@example.com"},
+			expected: []string{"john.smith@example.com", "johnsmith@example.com", "jsmith@example.com", "john@example.com", "smith@example.com", "js@example.com"},
 		},
 		{
 			name:     "single letter first name",
 			realName: "T Stromberg",
 			domain:   "example.com",
-			expected: []string{"t.stromberg@example.com", "t@example.com"}, // Includes firstname@domain pattern
+			expected: nil, // Single-letter names are now filtered out for quality
 		},
 		{
 			name:     "single name",
 			realName: "Madonna",
 			domain:   "example.com",
-			expected: nil, // Should return nil for single names
+			expected: []string{"madonna@example.com"}, // Single names now generate guesses
 		},
 		{
 			name:     "empty name",
@@ -563,8 +545,8 @@ func TestGenerateNameBasedGuesses(t *testing.T) {
 				return
 			}
 			for i, expected := range tt.expected {
-				if result[i] != expected {
-					t.Errorf("Expected guess %d to be %s, got %s", i, expected, result[i])
+				if result[i].Email != expected {
+					t.Errorf("Expected guess %d to be %s, got %s", i, expected, result[i].Email)
 				}
 			}
 		})
@@ -627,5 +609,282 @@ func TestContainsMethod(t *testing.T) {
 
 	if containsMethod(methods, "nonexistent") {
 		t.Error("Expected not to find 'nonexistent' method")
+	}
+}
+
+func TestFilterAndNormalizeGitHubNoreply(t *testing.T) {
+	// Test that GitHub noreply emails are preserved (not normalized)
+	result := &Result{
+		Username: "testuser",
+		Addresses: []Address{
+			{Email: "147884153+golanglemonade@users.noreply.github.com", Methods: []string{"commits"}, Verified: false},
+			{Email: "normal+tag@example.com", Methods: []string{"api"}, Verified: false},
+			{Email: "", Name: "Empty Email User", Methods: []string{"api"}, Verified: false}, // Should be filtered out
+		},
+	}
+
+	filtered := result.FilterAndNormalize(FilterOptions{})
+
+	// Should have 2 addresses (GitHub noreply + normalized regular email, empty email filtered out)
+	if len(filtered.Addresses) != 2 {
+		t.Errorf("Expected 2 addresses, got %d", len(filtered.Addresses))
+	}
+
+	// Find the GitHub noreply address
+	var githubAddr *Address
+	var normalAddr *Address
+	for i, addr := range filtered.Addresses {
+		if strings.Contains(addr.Email, "users.noreply.github.com") {
+			githubAddr = &filtered.Addresses[i]
+		} else {
+			normalAddr = &filtered.Addresses[i]
+		}
+	}
+
+	if githubAddr == nil {
+		t.Fatal("Expected to find GitHub noreply address")
+	}
+	if normalAddr == nil {
+		t.Fatal("Expected to find normal address")
+	}
+
+	// GitHub noreply address should preserve the +username part
+	if githubAddr.Email != "147884153+golanglemonade@users.noreply.github.com" {
+		t.Errorf("Expected GitHub noreply to be preserved, got %s", githubAddr.Email)
+	}
+
+	// Normal address should be normalized (remove +tag)
+	if normalAddr.Email != "normal@example.com" {
+		t.Errorf("Expected normal email to be normalized to normal@example.com, got %s", normalAddr.Email)
+	}
+}
+
+func TestSkipGitHubNoreplyInPrefixGuessing(t *testing.T) {
+	// Test that GitHub noreply addresses (with +username) are skipped when generating prefix-based guesses
+	addresses := []Address{
+		{Email: "147884153+golanglemonade@users.noreply.github.com", Name: "Sarah Funkhouser", Methods: []string{"commits"}},
+		{Email: "real.user@other.com", Name: "Real User", Methods: []string{"commits"}},
+	}
+
+	lookup := &Lookup{}
+	guesses := lookup.generateIntelligentGuesses(context.Background(), "golanglemonade", addresses, "example.com")
+
+	// Should not include 147884153@example.com (from GitHub noreply ID)
+	// Should include real.user@example.com (from other domain)
+	var hasGitHubPrefix, hasRealPrefix bool
+	for _, guess := range guesses {
+		if guess.Email == "147884153@example.com" {
+			hasGitHubPrefix = true
+			t.Logf("Found unwanted GitHub prefix guess: %s (pattern: %s, source: %s)",
+				guess.Email, guess.Pattern, guess.Sources["source_email"])
+		}
+		if guess.Email == "real.user@example.com" {
+			hasRealPrefix = true
+		}
+	}
+
+	if hasGitHubPrefix {
+		t.Error("Should not generate prefix guess from GitHub noreply address - the numeric ID is not a useful email prefix")
+	}
+	if !hasRealPrefix {
+		t.Error("Should generate prefix guess from real email address")
+	}
+
+	// Additional verification: check that we do get name-based guesses from the GitHub noreply address
+	var hasNameGuess bool
+	for _, guess := range guesses {
+		if strings.Contains(guess.Email, "sarah") || strings.Contains(guess.Email, "funkhouser") {
+			hasNameGuess = true
+			break
+		}
+	}
+	if !hasNameGuess {
+		t.Error("Should still generate name-based guesses from GitHub noreply address name field")
+	}
+}
+
+func TestSkipGenericPrefixesInGuessing(t *testing.T) {
+	// Mock addresses that include generic prefixes that should be filtered out
+	addresses := []Address{
+		{Email: "mail@example.com"},       // Should be skipped - generic
+		{Email: "info@company.org"},       // Should be skipped - generic
+		{Email: "admin@business.net"},     // Should be skipped - generic
+		{Email: "support@service.io"},     // Should be skipped - generic
+		{Email: "contact@website.dev"},    // Should be skipped - generic
+		{Email: "john.doe@personal.com"},  // Should be used - not generic
+		{Email: "realuser@somewhere.org"}, // Should be used - not generic
+	}
+
+	lookup := &Lookup{}
+	guesses := lookup.generateIntelligentGuesses(context.Background(), "testuser", addresses, "target.com")
+
+	// Track which guesses we found
+	foundGuesses := make(map[string]bool)
+	for _, guess := range guesses {
+		if guess.Pattern == "same_prefix_as_other_domain" {
+			foundGuesses[guess.Email] = true
+		}
+	}
+
+	// Should NOT find guesses from generic prefixes
+	genericShouldNotExist := []string{
+		"mail@target.com", "info@target.com", "admin@target.com",
+		"support@target.com", "contact@target.com",
+	}
+	for _, shouldNotExist := range genericShouldNotExist {
+		if foundGuesses[shouldNotExist] {
+			t.Errorf("Generic prefix should not generate guess: %s", shouldNotExist)
+		}
+	}
+
+	// Should find guesses from non-generic prefixes
+	shouldExist := []string{
+		"john.doe@target.com", "realuser@target.com",
+	}
+	for _, shouldExist := range shouldExist {
+		if !foundGuesses[shouldExist] {
+			t.Errorf("Non-generic prefix should generate guess: %s", shouldExist)
+		}
+	}
+}
+
+func TestParseUsernameForNames(t *testing.T) {
+	tests := []struct {
+		name       string
+		username   string
+		domain     string
+		knownNames []string
+		expected   []string
+	}{
+		{
+			name:       "profile-based parsing with known name",
+			username:   "amyoxley",
+			domain:     "example.com",
+			knownNames: []string{"amy"},
+			expected:   []string{"amy.oxley@example.com"},
+		},
+		{
+			name:       "profile-based parsing with full known name",
+			username:   "johndoe123",
+			domain:     "example.com",
+			knownNames: []string{"John Doe"},
+			expected:   []string{"john.doe123@example.com"},
+		},
+		{
+			name:       "fallback to common names when no profile match",
+			username:   "mikesmith",
+			domain:     "example.com",
+			knownNames: []string{"Robert"},
+			expected:   []string{"mike.smith@example.com"},
+		},
+		{
+			name:       "common name parsing without profile",
+			username:   "sarahjones",
+			domain:     "example.com",
+			knownNames: []string{},
+			expected:   []string{"sarah.jones@example.com"},
+		},
+		{
+			name:       "username too short - no guesses",
+			username:   "amy",
+			domain:     "example.com",
+			knownNames: []string{"amy"},
+			expected:   []string{},
+		},
+		{
+			name:       "no valid last name part",
+			username:   "amy12",
+			domain:     "example.com",
+			knownNames: []string{"amy"},
+			expected:   []string{},
+		},
+		{
+			name:       "no common name match",
+			username:   "xyz123abc",
+			domain:     "example.com",
+			knownNames: []string{"Bob"},
+			expected:   []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseUsernameForNames(tt.username, tt.domain, tt.knownNames...)
+			if len(result) != len(tt.expected) {
+				t.Errorf("Expected %d guesses, got %d: %v", len(tt.expected), len(result), result)
+				return
+			}
+			for i, expected := range tt.expected {
+				if result[i].Email != expected {
+					t.Errorf("Expected guess %d to be %s, got %s", i, expected, result[i].Email)
+				}
+			}
+		})
+	}
+}
+
+func TestParseUsernameForNamesConfidenceLevels(t *testing.T) {
+	// Profile-based parsing should have higher confidence than generic parsing
+	profileResult := parseUsernameForNames("amyoxley", "example.com", "amy")
+	genericResult := parseUsernameForNames("amyoxley", "example.com")
+
+	if len(profileResult) == 0 || len(genericResult) == 0 {
+		t.Fatal("Expected results from both parsing methods")
+	}
+
+	if profileResult[0].Confidence <= genericResult[0].Confidence {
+		t.Errorf("Profile-based parsing should have higher confidence: profile=%d, generic=%d",
+			profileResult[0].Confidence, genericResult[0].Confidence)
+	}
+
+	if profileResult[0].Pattern != "profile_parsed_username" {
+		t.Errorf("Expected profile-based pattern, got %s", profileResult[0].Pattern)
+	}
+
+	if genericResult[0].Pattern != "parsed_username" {
+		t.Errorf("Expected generic parsed pattern, got %s", genericResult[0].Pattern)
+	}
+}
+
+func TestRealWorldGitHubNoreplyCase(t *testing.T) {
+	// Test the exact case from matoszz user to replicate the real-world issue
+	addresses := []Address{
+		{Email: "42154938+matoszz@users.noreply.github.com", Name: "Matt Anderson", Methods: []string{"commits"}, Verified: false},
+		// Simulate empty email from public API with just name data
+		{Email: "", Name: "Matt Anderson", Methods: []string{"public_api"}, Verified: false},
+	}
+
+	lookup := &Lookup{}
+	guesses := lookup.generateIntelligentGuesses(context.Background(), "matoszz", addresses, "theopenlane.io")
+
+	// Debug: log all guesses
+	for i, guess := range guesses {
+		t.Logf("Guess %d: %s (pattern: %s, source: %s)", i, guess.Email, guess.Pattern, guess.Sources["source_email"])
+	}
+
+	// Check that we don't get 42154938@theopenlane.io
+	var hasUnwantedGitHubPrefix bool
+	for _, guess := range guesses {
+		if guess.Email == "42154938@theopenlane.io" {
+			hasUnwantedGitHubPrefix = true
+			t.Errorf("Found unwanted GitHub noreply prefix: %s (source: %s)",
+				guess.Email, guess.Sources["source_email"])
+		}
+	}
+
+	if hasUnwantedGitHubPrefix {
+		t.Fatal("GitHub noreply numeric prefix should not be used for guessing")
+	}
+
+	// Verify we still get proper name-based guesses
+	var hasNameBasedGuess bool
+	for _, guess := range guesses {
+		if strings.Contains(guess.Email, "matt") || strings.Contains(guess.Email, "anderson") {
+			hasNameBasedGuess = true
+			break
+		}
+	}
+	if !hasNameBasedGuess {
+		t.Error("Should generate name-based guesses from Matt Anderson")
 	}
 }

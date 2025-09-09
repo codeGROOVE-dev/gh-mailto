@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>grooveHUB email discovery</title>
+        <style>
+            :root {
+                --primary-black: #1d1d1f;
+                --primary-white: #fff;
+                --accent-yellow: #ffcc00;
+                --accent-blue: #007aff;
+                --accent-purple: #5856d6;
+                --accent-green: #34c759;
+                --accent-orange: #ff9500;
+                --accent-pink: #ff2d92;
+                --subtle-gray: #f2f2f7;
+                --border-gray: #d2d2d7;
+                --text-secondary: #86868b;
+                --text-tertiary: #6e6e73;
+                --background-gray: #fafafa;
+                --shadow-light: 0 2px 8px rgba(0, 0, 0, 0.08);
+                --shadow-medium: 0 4px 20px rgba(0, 0, 0, 0.12);
+                --shadow-glow: 0 0 20px rgba(255, 204, 0, 0.3);
+                --gradient-main: linear-gradient(
+                    135deg,
+                    #667eea 0%,
+                    #764ba2 100%
+                );
+                --gradient-accent: linear-gradient(
+                    135deg,
+                    var(--accent-yellow) 0%,
+                    #e6b800 100%
+                );
+                --gradient-success: linear-gradient(
+                    135deg,
+                    var(--accent-green) 0%,
+                    #28a745 100%
+                );
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+                    sans-serif;
+                background: var(--background-gray);
+                margin: 0;
+                padding: 32px 24px;
+                line-height: 1.6;
+                color: var(--primary-black);
+                min-height: 100vh;
+            }
+
+            .container {
+                max-width: 840px;
+                margin: 0 auto;
+                padding: 0;
+                background: white;
+                border: 1px solid #d2d2d7;
+                border-radius: 10px;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+                overflow: hidden;
+            }
+
+            @media (max-width: 480px) {
+                body {
+                    padding: 24px 20px;
+                }
+            }
+
+            @keyframes fadeIn {
+                from {
+                    opacity: 0;
+                    transform: translateY(20px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+            }
+
+            .header {
+                padding: 20px 32px;
+                display: flex;
+                align-items: center;
+                background: white;
+                border-bottom: 4px solid var(--accent-yellow);
+                margin-bottom: 32px;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            
+            .header:hover {
+                border-bottom: 6px solid var(--accent-yellow);
+                padding-bottom: 18px;
+            }
+
+            .logo {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+
+            .site-logo {
+                width: 36px;
+                height: 36px;
+                filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            .site-logo:hover {
+                transform: rotate(15deg) scale(1.1);
+                filter: drop-shadow(0 4px 8px rgba(255, 221, 0, 0.3));
+            }
+
+            @media (max-width: 480px) {
+                .site-logo {
+                    width: 32px;
+                    height: 32px;
+                }
+            }
+
+            h1 {
+                font-size: 24px;
+                font-weight: 700;
+                color: #333;
+                margin: 0;
+                letter-spacing: -0.03em;
+                line-height: 1.1;
+                transition: letter-spacing 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            h1:hover {
+                letter-spacing: -0.01em;
+            }
+
+            @media (max-width: 480px) {
+                h1 {
+                    font-size: 22px;
+                }
+            }
+
+            .subtitle {
+                font-size: 18px;
+                color: var(--text-secondary);
+                margin: 0 0 32px;
+                font-weight: 400;
+            }
+
+            .reality-check {
+                margin: 0 32px 16px;
+                background: var(--subtle-gray);
+                border-radius: 4px;
+                padding: 12px 16px;
+                border-left: 3px solid var(--accent-yellow);
+                font-size: 14px;
+                line-height: 1.4;
+            }
+
+            .reality-check h3 {
+                font-size: 18px;
+                font-weight: 600;
+                color: var(--primary-black);
+                margin: 0 0 8px;
+            }
+
+            .reality-check p {
+                font-size: 16px;
+                color: var(--text-secondary);
+                margin: 0 0 12px;
+                line-height: 1.4;
+            }
+
+            .reality-check ul {
+                margin: 0;
+                padding-left: 20px;
+                font-size: 16px;
+                color: var(--text-secondary);
+            }
+
+            .reality-check li {
+                margin-bottom: 6px;
+                line-height: 1.4;
+            }
+
+            .form-container {
+                padding: 20px 32px 24px;
+            }
+
+            .form-group {
+                margin-bottom: 16px;
+            }
+
+            label {
+                display: block;
+                font-size: 16px;
+                font-weight: 500;
+                color: var(--primary-black);
+                margin-bottom: 8px;
+                transition: color 0.2s ease;
+            }
+
+            input[type="text"] {
+                width: 100%;
+                padding: 14px 16px;
+                border: 1px solid #d2d2d7;
+                border-radius: 10px;
+                font-size: 16px;
+                font-family: inherit;
+                background: #fafafa;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            input[type="text"]:focus {
+                outline: none;
+                border-color: var(--accent-blue);
+                background: white;
+                box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1);
+                transform: scale(1.02);
+            }
+
+            input[type="text"]::placeholder {
+                color: var(--text-secondary);
+            }
+
+            .checkbox-wrapper {
+                background: #f2f2f7;
+                border-radius: 10px;
+                padding: 16px;
+                margin-bottom: 24px;
+                border: 1px solid #d2d2d7;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            .checkbox-wrapper:hover {
+                background: #e5e5ea;
+                border-color: var(--accent-blue);
+                transform: scale(1.01);
+            }
+
+            .checkbox-group {
+                display: flex;
+                align-items: center;
+            }
+
+            input[type="checkbox"] {
+                width: 20px;
+                height: 20px;
+                margin-right: 12px;
+                accent-color: var(--accent-blue);
+                transform: scale(1.2);
+            }
+
+            .checkbox-group label {
+                margin: 0;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            .submit-btn {
+                width: 100%;
+                padding: 16px 20px;
+                background: linear-gradient(135deg, var(--accent-yellow) 0%, #e6b800 100%);
+                color: #1d1d1f;
+                border: 1px solid var(--accent-yellow);
+                border-radius: 10px;
+                font-size: 16px;
+                font-weight: 600;
+                font-family: inherit;
+                cursor: pointer;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                box-shadow: 0 2px 8px rgba(255, 204, 0, 0.2);
+            }
+
+            .submit-btn:hover {
+                background: linear-gradient(135deg, #e6b800 0%, var(--accent-yellow) 100%);
+                transform: translateY(-2px) scale(1.02);
+                box-shadow: 0 6px 20px rgba(255, 204, 0, 0.3);
+            }
+
+            .submit-btn:active {
+                transform: translateY(0);
+            }
+
+            .results {
+                margin: 32px 32px 0;
+                background: var(--primary-white);
+                border: 1px solid var(--border-gray);
+                border-radius: 10px;
+                overflow: hidden;
+                box-shadow: var(--shadow-light);
+                animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            @keyframes slideUp {
+                from {
+                    opacity: 0;
+                    transform: translateY(20px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+            }
+
+            .results h2 {
+                font-size: 20px;
+                font-weight: 600;
+                color: var(--primary-black);
+                margin: 0;
+                padding: 20px 24px 16px;
+                border-bottom: 1px solid var(--border-gray);
+                background: var(--primary-white);
+            }
+
+            .result-item {
+                background: var(--primary-white);
+                padding: 20px 24px;
+                border-bottom: 1px solid var(--border-gray);
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 16px;
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            .result-item:last-child {
+                border-bottom: none;
+            }
+
+            .result-item:hover {
+                background: var(--subtle-gray);
+                transform: translateX(2px) scale(1.01);
+            }
+
+            .email-info {
+                flex: 1;
+                min-width: 0;
+            }
+
+            .email-address {
+                font-size: 16px;
+                font-weight: 600;
+                color: var(--accent-blue);
+                font-family:
+                    "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
+                word-break: break-all;
+                border-left: 3px solid var(--accent-yellow);
+                padding-left: 8px;
+            }
+
+            .email-address.verified-email {
+                color: var(--accent-green);
+                border-left-color: var(--accent-green);
+            }
+
+            .email-pattern {
+                font-size: 14px;
+                color: var(--text-secondary);
+                margin-top: 4px;
+            }
+
+            .confidence-badge {
+                padding: 8px 16px;
+                border-radius: 20px;
+                font-size: 14px;
+                font-weight: 600;
+                white-space: nowrap;
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+
+            /* High confidence (90-100%) */
+            .conf-100,
+            .conf-99,
+            .conf-98,
+            .conf-97,
+            .conf-96,
+            .conf-95,
+            .conf-94,
+            .conf-93,
+            .conf-92,
+            .conf-91,
+            .conf-90 {
+                background: #10b981;
+                color: white;
+            }
+
+            /* Good confidence (70-89%) */
+            .conf-89,
+            .conf-88,
+            .conf-87,
+            .conf-86,
+            .conf-85,
+            .conf-84,
+            .conf-83,
+            .conf-82,
+            .conf-81,
+            .conf-80,
+            .conf-79,
+            .conf-78,
+            .conf-77,
+            .conf-76,
+            .conf-75,
+            .conf-74,
+            .conf-73,
+            .conf-72,
+            .conf-71,
+            .conf-70 {
+                background: var(--accent-blue);
+                color: white;
+            }
+
+            /* Moderate confidence (50-69%) */
+            .conf-69,
+            .conf-68,
+            .conf-67,
+            .conf-66,
+            .conf-65,
+            .conf-64,
+            .conf-63,
+            .conf-62,
+            .conf-61,
+            .conf-60,
+            .conf-59,
+            .conf-58,
+            .conf-57,
+            .conf-56,
+            .conf-55,
+            .conf-54,
+            .conf-53,
+            .conf-52,
+            .conf-51,
+            .conf-50 {
+                background: var(--accent-yellow);
+                color: var(--primary-black);
+            }
+
+            /* Low confidence (<50%) */
+            .conf-49,
+            .conf-48,
+            .conf-47,
+            .conf-46,
+            .conf-45,
+            .conf-44,
+            .conf-43,
+            .conf-42,
+            .conf-41,
+            .conf-40,
+            .conf-39,
+            .conf-38,
+            .conf-37,
+            .conf-36,
+            .conf-35,
+            .conf-34,
+            .conf-33,
+            .conf-32,
+            .conf-31,
+            .conf-30,
+            .conf-29,
+            .conf-28,
+            .conf-27,
+            .conf-26,
+            .conf-25,
+            .conf-24,
+            .conf-23,
+            .conf-22,
+            .conf-21,
+            .conf-20,
+            .conf-19,
+            .conf-18,
+            .conf-17,
+            .conf-16,
+            .conf-15,
+            .conf-14,
+            .conf-13,
+            .conf-12,
+            .conf-11,
+            .conf-10 {
+                background: #ef4444;
+                color: white;
+            }
+
+            .reference-section {
+                padding: 0 24px 20px;
+            }
+
+            .reference-section h3 {
+                font-size: 20px;
+                font-weight: 600;
+                color: var(--text-secondary);
+                margin: 24px 0 16px;
+            }
+
+            .verified-email {
+                color: #10b981;
+                font-weight: 600;
+            }
+
+            .no-results {
+                padding: 40px 24px;
+                text-align: center;
+                color: var(--text-secondary);
+            }
+
+            .no-results h3 {
+                font-size: 20px;
+                font-weight: 600;
+                margin: 0 0 16px;
+            }
+
+            .no-results ul {
+                text-align: left;
+                display: inline-block;
+                margin: 20px 0 0;
+                color: var(--text-secondary);
+            }
+
+            .no-results li {
+                margin-bottom: 8px;
+                font-size: 16px;
+                line-height: 1.4;
+            }
+
+            .error-box {
+                margin: 0 32px 24px;
+                background: #fef2f2;
+                border: 2px solid #fecaca;
+                border-radius: 12px;
+                padding: 20px;
+                border-left: 4px solid #ef4444;
+            }
+
+            .error-box h3 {
+                color: #ef4444;
+                font-size: 18px;
+                font-weight: 600;
+                margin: 0 0 8px;
+            }
+
+            .error-box p {
+                color: var(--text-secondary);
+                margin: 0;
+                font-size: 16px;
+            }
+
+            .cache-info {
+                font-size: 14px;
+                color: var(--text-secondary);
+                text-align: center;
+                margin-top: 12px;
+            }
+
+            .footer {
+                padding: 32px;
+                text-align: center;
+                color: var(--text-secondary);
+                font-size: 14px;
+                background: var(--subtle-gray);
+            }
+
+            .footer a {
+                color: var(--accent-blue);
+                text-decoration: none;
+                transition: color 0.2s ease;
+            }
+
+            .footer a:hover {
+                color: var(--primary-black);
+            }
+
+            /* Mobile responsiveness */
+            @media (max-width: 480px) {
+                .header {
+                    padding: 16px 20px;
+                    margin-bottom: 24px;
+                }
+                .form-container {
+                    padding: 20px 24px 24px;
+                }
+                .reality-check {
+                    margin: 0 20px 20px;
+                    padding: 16px;
+                }
+                .results {
+                    margin: 24px 24px 0;
+                }
+                .result-item {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 12px;
+                    padding: 16px 20px;
+                }
+                .confidence-badge {
+                    align-self: flex-start;
+                }
+                .footer {
+                    padding: 24px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <div class="logo">
+                    <img
+                        src="/static/logo-small.png"
+                        alt="Logo"
+                        class="site-logo"
+                    />
+                    <div>
+                        <h1>GitHub Email Discovery</h1>
+                        <div class="subtitle">
+                            find email addresses on GitHub
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="reality-check">
+                <strong>NOTE</strong>: Don't spam people. This is using public
+                data only - its credentials cannot perform org-level e-mail
+                verification.
+            </div>
+
+            {{if .Error}}
+            <div class="error-box">
+                <h3>Something went wrong</h3>
+                <p>{{.Error}}</p>
+            </div>
+            {{end}}
+
+            <div class="form-container">
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="username">GitHub Username</label>
+                        <input
+                            type="text"
+                            id="username"
+                            name="username"
+                            value="{{.Username}}"
+                            placeholder="e.g. torvalds, gaearon, sindresorhus"
+                            required
+                        />
+                    </div>
+
+                    <div class="form-group">
+                        <label for="domain"
+                            >Target Domain
+                            <span
+                                style="
+                                    font-weight: 400;
+                                    color: var(--text-secondary);
+                                "
+                                >(optional)</span
+                            ></label
+                        >
+                        <input
+                            type="text"
+                            id="domain"
+                            name="domain"
+                            value="{{.Domain}}"
+                            placeholder="e.g. google.com, github.com"
+                        />
+                    </div>
+
+                    <div class="checkbox-wrapper">
+                        <div class="checkbox-group">
+                            <input
+                                type="checkbox"
+                                id="guess"
+                                name="guess"
+                                {{if
+                                .Guess}}checked{{end}}
+                            />
+                            <label for="guess"
+                                >Try some wild guesses
+                                <span
+                                    style="
+                                        font-weight: 400;
+                                        color: var(--text-secondary);
+                                    "
+                                    >(requires target domain)</span
+                                ></label
+                            >
+                        </div>
+                    </div>
+
+                    <button type="submit" class="submit-btn">
+                        Find Email Addresses
+                    </button>
+                </form>
+            </div>
+
+            {{if .Results}}
+            <div class="results">
+                {{if .Guess}}
+                <h2>
+                    Wild Guesses
+                    <span style="font-weight: 400; color: var(--text-secondary)"
+                        >({{len .Results.Guesses}} generated)</span
+                    >
+                </h2>
+                {{if .Results.Guesses}} {{range $i, $guess := .Results.Guesses}}
+                <div class="result-item">
+                    <div class="email-info">
+                        <div class="email-address">{{$guess.Email}}</div>
+                        <div class="email-pattern">
+                            Pattern: {{$guess.Pattern}}
+                        </div>
+                        {{if $guess.Sources}}
+                        <div class="email-pattern">
+                            Based on {{range $method, $rawEmail :=
+                            $guess.Sources}}{{$method}}{{if ne $rawEmail
+                            $guess.Email}} ({{$rawEmail}}){{end}}{{end}}
+                        </div>
+                        {{end}}
+                    </div>
+                    <div class="confidence-badge conf-{{$guess.Confidence}}">
+                        {{$guess.Confidence}}%
+                    </div>
+                </div>
+                {{end}} {{else}}
+                <div class="no-results">
+                    <h3>No luck with the guesses</h3>
+                    <p>Could be because:</p>
+                    <ul>
+                        <li>User keeps their info locked down</li>
+                        <li>No obvious patterns to work with</li>
+                        <li>Username doesn't exist</li>
+                        <li>Our algorithm isn't that smart</li>
+                    </ul>
+                </div>
+                {{end}} {{if .Results.FoundAddresses}}
+                <div class="reference-section">
+                    <h3>
+                        What We Actually Found
+                        <span
+                            style="
+                                font-size: 14px;
+                                font-weight: 400;
+                                color: var(--text-secondary);
+                            "
+                            >(real addresses we discovered)</span
+                        >
+                    </h3>
+                    {{range .Results.FoundAddresses}}
+                    <div class="result-item">
+                        <div class="email-info">
+                            <div
+                                class="email-address {{if .Verified}}verified-email{{end}}"
+                            >
+                                {{if .Verified}}🔒{{else}}📧{{end}} {{.Email}}
+                            </div>
+                            {{if .Sources}}
+                            <div class="email-pattern">
+                                🔍 via {{$email := .Email}}{{$first :=
+                                true}}{{range $method, $rawEmail :=
+                                .Sources}}{{if not (or (eq $method
+                                "commits_age_months") (eq $method
+                                "source_email") (eq $method "source_name") (eq
+                                $method "source_username"))}}{{if not $first}},
+                                {{end}}{{$method}}{{if ne $rawEmail $email}}:
+                                {{$rawEmail}}{{end}}{{$first =
+                                false}}{{end}}{{end}}
+                            </div>
+                            {{else if .Methods}}
+                            <div class="email-pattern">
+                                🔍 via {{joinMethodsWithOrgs .Methods .Sources}}
+                            </div>
+                            {{end}}
+                        </div>
+                        <div class="confidence-badge conf-{{.Confidence}}">
+                            {{.Confidence}}%
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+                {{end}} {{else}}
+                <h2>
+                    Discovered Addresses
+                    <span style="font-weight: 400; color: var(--text-secondary)"
+                        >({{len .Results.Addresses}} found)</span
+                    >
+                </h2>
+                {{if .Results.Addresses}} {{range .Results.Addresses}}
+                <div class="result-item">
+                    <div class="email-info">
+                        <div
+                            class="email-address {{if .Verified}}verified-email{{end}}"
+                        >
+                            {{.Email}}
+                        </div>
+                        {{if .Name}}
+                        <div class="email-pattern">Name: {{.Name}}</div>
+                        {{end}} {{if .Sources}}
+                        <div class="email-pattern">
+                            Found via {{$email := .Email}}{{$first :=
+                            true}}{{range $method, $rawEmail := .Sources}}{{if
+                            not (or (eq $method "commits_age_months") (eq
+                            $method "source_email") (eq $method "source_name")
+                            (eq $method "source_username"))}}{{if not $first}},
+                            {{end}}{{$method}}{{if ne $rawEmail $email}}
+                            ({{$rawEmail}}){{end}}{{$first =
+                            false}}{{end}}{{end}}
+                        </div>
+                        {{else if .Methods}}
+                        <div class="email-pattern">
+                            Found via {{joinMethodsWithOrgs .Methods .Sources}}
+                        </div>
+                        {{end}}
+                    </div>
+                    <div class="confidence-badge conf-{{.Confidence}}">
+                        {{.Confidence}}%
+                    </div>
+                </div>
+                {{end}} {{else}}
+                <div class="no-results">
+                    <h3>No email addresses found</h3>
+                    <p>This user either:</p>
+                    <ul>
+                        <li>Keeps their email private</li>
+                        <li>Doesn't exist</li>
+                        <li>Has never made public contributions</li>
+                    </ul>
+                </div>
+                {{end}} {{end}} {{if .CacheHit}}
+                <div class="cache-info">Results served from cache</div>
+                {{end}}
+            </div>
+            {{end}}
+
+            <div class="footer">
+                <p>
+                    <a href="https://github.com/codeGROOVE-dev/gh-mailto"
+                        >source on github</a
+                    >
+                    • Made with 🪿 by
+                    <a href="https://codegroove.dev/">codeGROOVE</a>
+                </p>
+            </div>
+        </div>
+    </body>
+</html>

@@ -8,42 +8,64 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/codeGROOVE-dev/retry"
 )
 
-const maxErrorBodySize = 1024
+const (
+	maxErrorBodySize    = 1024
+	maxResponseBodySize = 10 * 1024 * 1024 // 10MB maximum response size to prevent memory exhaustion
+)
 
 // httpClient provides a reusable HTTP client with sensible defaults.
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
-// doRequest performs an HTTP request with proper error handling and resource cleanup.
-func (lu *Lookup) doRequest(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
-	return lu.doRequestWithAccept(ctx, method, url, body, "application/vnd.github.v3+json")
-}
-
-// doRequestWithAccept performs an HTTP request with a custom Accept header.
+// doRequestWithAccept performs an HTTP request with a custom Accept header and exponential backoff.
 func (lu *Lookup) doRequestWithAccept(ctx context.Context, method, url string, body io.Reader, accept string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	var finalResp *http.Response
+
+	err := retry.Do(
+		func() error {
+			req, reqErr := http.NewRequestWithContext(ctx, method, url, body)
+			if reqErr != nil {
+				return retry.Unrecoverable(fmt.Errorf("creating request: %w", reqErr))
+			}
+
+			req.Header.Set("Authorization", "Bearer "+lu.token)
+			req.Header.Set("Accept", accept)
+			req.Header.Set("User-Agent", "gh-mailto/1.0")
+
+			resp, httpErr := httpClient.Do(req)
+			if httpErr != nil {
+				lu.logger.Debug("HTTP request failed, will retry", "error", httpErr, "url", url)
+				return fmt.Errorf("executing request: %w", httpErr)
+			}
+
+			// Retry on server errors (5xx) and rate limiting (429)
+			if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					lu.logger.Debug("failed to close response body", "error", closeErr)
+				}
+				lu.logger.Debug("HTTP error, will retry", "status", resp.StatusCode, "url", url)
+				return fmt.Errorf("HTTP %d error", resp.StatusCode)
+			}
+
+			finalResp = resp
+			return nil
+		},
+		retry.Attempts(5),
+		retry.Delay(100*time.Millisecond),
+		retry.MaxDelay(2*time.Minute),
+		retry.DelayType(retry.BackOffDelay),
+		retry.Context(ctx),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+lu.token)
-	req.Header.Set("Accept", accept)
-	req.Header.Set("User-Agent", "gh-mailto/1.0")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
-	}
-
-	return resp, nil
-}
-
-// doJSONRequest performs an HTTP request and decodes the JSON response.
-func (lu *Lookup) doJSONRequest(ctx context.Context, method, url string, body io.Reader, result any) error {
-	return lu.doJSONRequestWithAccept(ctx, method, url, body, result, "application/vnd.github.v3+json")
+	return finalResp, nil
 }
 
 // doJSONRequestWithAccept performs an HTTP request with custom Accept header and decodes the JSON response.
@@ -67,18 +89,23 @@ func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url strin
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Read the entire response body for logging
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Read the response body with size limit to prevent memory exhaustion
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		return fmt.Errorf("reading response body: %w", err)
 	}
 
-	// Log the raw response
-	lu.logger.Debug("raw API response",
+	// Check if we hit the limit
+	if len(bodyBytes) == maxResponseBodySize {
+		return fmt.Errorf("response body too large (>%d bytes)", maxResponseBodySize)
+	}
+
+	// Log response metadata only - never log response body for security
+	lu.logger.Debug("API response received",
 		"method", method,
 		"url", url,
 		"status", resp.StatusCode,
-		"response", string(bodyBytes),
+		"content_length", len(bodyBytes),
 	)
 
 	if err := json.Unmarshal(bodyBytes, result); err != nil {

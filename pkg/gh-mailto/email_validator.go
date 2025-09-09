@@ -17,9 +17,16 @@ func isValidEmail(email string) bool {
 		return false
 	}
 
-	// Exclude noreply addresses
-	if strings.Contains(strings.ToLower(email), "noreply") {
-		return false
+	// Exclude generic noreply addresses, but allow GitHub user noreply addresses
+	// GitHub uses pattern: {user_id}+{username}@users.noreply.github.com
+	lowerEmail := strings.ToLower(email)
+	if strings.Contains(lowerEmail, "noreply") {
+		// Allow GitHub user noreply addresses which contain a username
+		if !strings.HasSuffix(lowerEmail, "@users.noreply.github.com") {
+			// Generic noreply address - reject it
+			return false
+		}
+		// This is a GitHub user noreply address with a username - allow it
 	}
 
 	// Use Go's built-in email parser for validation
