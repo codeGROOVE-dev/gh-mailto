@@ -665,7 +665,28 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 		}
 
 		if existing, exists := guessMap[email]; exists {
-			// Combine confidence scores (additive, capped at 100)
+			// Check if this is the same pattern - if so, don't double count
+			if existing.Pattern == pattern {
+				// Same pattern from different source - keep highest confidence, don't add
+				if confidence > existing.Confidence {
+					lu.logger.Debug("updating guess with higher confidence from different source",
+						"email", email, "old_confidence", existing.Confidence, "old_sources", existing.Sources,
+						"new_confidence", confidence, "new_sources", sources, "pattern", pattern)
+					existing.Confidence = confidence
+					// Update sources to reflect the higher confidence source
+					existing.Sources = make(map[string]string)
+					for key, value := range sources {
+						existing.Sources[key] = value
+					}
+				} else {
+					lu.logger.Debug("ignoring duplicate pattern guess with lower/equal confidence",
+						"email", email, "existing_confidence", existing.Confidence, "existing_sources", existing.Sources,
+						"duplicate_confidence", confidence, "duplicate_sources", sources, "pattern", pattern)
+				}
+				return
+			}
+
+			// Different patterns - combine confidence scores (additive, capped at 100)
 			oldConfidence := existing.Confidence
 			combinedConfidence := existing.Confidence + confidence
 			if combinedConfidence > 100 {
@@ -673,10 +694,10 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 			}
 			existing.Confidence = combinedConfidence
 
-			lu.logger.Debug("combining guess scores",
-				"email", email, "old_confidence", oldConfidence,
-				"new_contribution", confidence, "combined_confidence", combinedConfidence,
-				"old_pattern", existing.Pattern, "new_pattern", pattern)
+			lu.logger.Debug("combining different pattern guesses",
+				"email", email, "old_confidence", oldConfidence, "old_pattern", existing.Pattern, "old_sources", existing.Sources,
+				"new_confidence", confidence, "new_pattern", pattern, "new_sources", sources,
+				"combined_confidence", combinedConfidence)
 
 			// Combine patterns
 			existing.Pattern = existing.Pattern + "+" + pattern
@@ -767,12 +788,36 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 	// Deduplicate names to avoid combining the same pattern multiple times
 	seenNames := make(map[string]bool, len(addresses))
 	for _, addr := range addresses {
-		if addr.Name != "" && !seenNames[addr.Name] {
-			seenNames[addr.Name] = true
-			nameGuesses := generateNameBasedGuesses(addr.Name, targetDomain)
-			for _, guess := range nameGuesses {
-				addGuess(guess.Email, guess.Confidence, guess.Pattern, guess.Sources)
+		if addr.Name == "" || seenNames[addr.Name] {
+			continue
+		}
+		seenNames[addr.Name] = true
+
+		// Log where this name came from
+		var discoveryMethods []string
+		if len(addr.Methods) > 0 {
+			discoveryMethods = addr.Methods
+		} else {
+			discoveryMethods = []string{"unknown"}
+		}
+
+		lu.logger.Debug("generating name-based guesses",
+			"name", addr.Name,
+			"email_source", addr.Email,
+			"discovery_methods", discoveryMethods,
+			"verified", addr.Verified)
+
+		nameGuesses := generateNameBasedGuesses(addr.Name, targetDomain)
+		for _, guess := range nameGuesses {
+			// Enhance the sources to include where the name came from
+			enhancedSources := make(map[string]string)
+			for key, value := range guess.Sources {
+				enhancedSources[key] = value
 			}
+			enhancedSources["name_source_email"] = addr.Email
+			enhancedSources["name_discovery_methods"] = strings.Join(discoveryMethods, ",")
+
+			addGuess(guess.Email, guess.Confidence, guess.Pattern, enhancedSources)
 		}
 	}
 

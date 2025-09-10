@@ -183,10 +183,25 @@ func printResults(result *ghmailto.Result, username, org string) {
 	// Display addresses with clean Unix-style formatting
 	for _, addr := range addressesToShow {
 		sourceText := extractSourceText(addr)
-		fmt.Printf("• %d%% - %s%s%s: %s%s%s\n",
+		patternText := formatPattern(addr.Pattern)
+		confirmationText := formatConfirmationSource(addr.Sources, addr.Pattern)
+
+		fmt.Printf("• %d%% - %s%s%s: %s%s%s",
 			addr.Confidence,
 			colorBold+colorWhite, addr.Email, colorReset,
 			colorDim, sourceText, colorReset)
+
+		// Add pattern information if available
+		if patternText != "" {
+			fmt.Printf(" %s[%s]%s", colorDim, patternText, colorReset)
+		}
+
+		// Add confirmation information if available
+		if confirmationText != "" {
+			fmt.Printf(" %s✓ %s%s", colorDim, confirmationText, colorReset)
+		}
+
+		fmt.Print("\n")
 	}
 	fmt.Println()
 }
@@ -267,6 +282,159 @@ func extractSourceText(addr ghmailto.Address) string {
 	return "unknown source"
 }
 
+// formatPattern converts a technical pattern identifier to a user-friendly display name.
+func formatPattern(pattern string) string {
+	if pattern == "" {
+		return ""
+	}
+
+	// Handle combined patterns (e.g., "flast+flast") - patterns combined with "+"
+	if strings.Contains(pattern, "+") {
+		combinedParts := strings.Split(pattern, "+")
+		var formattedParts []string
+		for _, part := range combinedParts {
+			if formatted := formatSinglePattern(part); formatted != "" {
+				formattedParts = append(formattedParts, formatted)
+			}
+		}
+		if len(formattedParts) > 1 {
+			return strings.Join(formattedParts, " + ")
+		} else if len(formattedParts) == 1 {
+			return formattedParts[0]
+		}
+	}
+
+	return formatSinglePattern(pattern)
+}
+
+// formatSinglePattern formats a single pattern without combined logic.
+func formatSinglePattern(pattern string) string {
+	// Handle compound patterns (e.g., "first.last_username_commits_found")
+	parts := strings.Split(pattern, "_")
+	basePattern := parts[0]
+
+	switch basePattern {
+	case "first.last":
+		return "First.Last"
+	case "first":
+		return "FirstName"
+	case "flast":
+		return "F.LastName"
+	case "last":
+		return "LastName"
+	case "initials":
+		return "Initials"
+	case "firstlast":
+		return "FirstnameLastname"
+	case "github":
+		if len(parts) > 2 && parts[1] == "username" {
+			if parts[2] == "exact" {
+				return "GitHub Username"
+			}
+			if parts[2] == "prefix" {
+				return "GitHub Username Prefix"
+			}
+		}
+		return "GitHub Username"
+	case "same":
+		if len(parts) >= 4 && strings.Join(parts[:4], "_") == "same_prefix_as_other" {
+			return "Same Prefix"
+		}
+		return "Same Pattern"
+	case "single":
+		return "Single Name"
+	case "parsed":
+		if len(parts) > 1 && parts[1] == "username" {
+			return "Parsed Username"
+		}
+		return "Parsed"
+	case "profile":
+		if len(parts) >= 3 && strings.Join(parts[:3], "_") == "profile_parsed_username" {
+			return "Profile-Based Parse"
+		}
+		return "Profile-Based"
+	case "git":
+		if len(parts) > 1 && parts[1] == "commits" {
+			return "Discovery (actual email found)"
+		}
+		return "Git-Based"
+	case "verified":
+		return "Verified Address"
+	case "saml":
+		return "SAML Identity"
+	case "org":
+		if len(parts) > 1 {
+			switch parts[1] {
+			case "verified":
+				return "Org Verified Domains"
+			case "member":
+				return "Org Member"
+			default:
+				return "Organization"
+			}
+		}
+		return "Organization"
+	case "public":
+		if len(parts) > 1 && parts[1] == "api" {
+			return "Public API"
+		}
+		return "Public"
+	default:
+		// Handle unknown patterns gracefully by capitalizing first letter
+		cleaned := strings.ReplaceAll(basePattern, "_", " ")
+		if cleaned == "" {
+			return ""
+		}
+		return strings.ToUpper(cleaned[:1]) + cleaned[1:]
+	}
+}
+
+// formatConfirmationSource extracts and formats the confirmation source from address sources.
+func formatConfirmationSource(sources map[string]string, pattern string) string {
+	if sources == nil {
+		return ""
+	}
+
+	// Check for GitHub search confirmations with specific details
+	if searchResult, exists := sources["github_search"]; exists {
+		return fmt.Sprintf("GitHub Issues/PRs (%s)", searchResult)
+	}
+	if searchResult, exists := sources["batched_github_search"]; exists {
+		return fmt.Sprintf("GitHub Issues/PRs (%s)", searchResult)
+	}
+
+	// Check for commit-based confirmations with specific details
+	if commitResult, exists := sources["commit_search"]; exists {
+		return fmt.Sprintf("Git Commits (%s)", commitResult)
+	}
+	if commitResult, exists := sources["github_commits_found"]; exists {
+		return fmt.Sprintf("Git Commits (%s)", commitResult)
+	}
+
+	// Check for organizations found in commits
+	if orgs, exists := sources["found_in_orgs"]; exists && orgs != "" {
+		return fmt.Sprintf("Git Commits (in %s)", orgs)
+	}
+
+	// Check pattern-based indications
+	if strings.Contains(pattern, "git_commits") {
+		return "Git Commits"
+	}
+	if strings.Contains(pattern, "commits_found") {
+		return "Git Commits"
+	}
+
+	// Check for other validation sources
+	if _, exists := sources["github_issues"]; exists {
+		return "GitHub Issues"
+	}
+	if _, exists := sources["github_prs"]; exists {
+		return "GitHub PRs"
+	}
+
+	return ""
+}
+
 // printGuessResults displays the guess results in a formatted manner.
 func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 	// Use the shared filtering logic
@@ -286,9 +454,24 @@ func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 	// Use same simple format for all results
 	for _, result := range allResults {
 		sourceText := extractSourceText(result)
-		fmt.Printf("• %d%% - %s%s%s: %s%s%s\n",
+		patternText := formatPattern(result.Pattern)
+		confirmationText := formatConfirmationSource(result.Sources, result.Pattern)
+
+		fmt.Printf("• %d%% - %s%s%s: %s%s%s",
 			result.Confidence,
 			colorBold+colorWhite, result.Email, colorReset,
 			colorDim, sourceText, colorReset)
+
+		// Add pattern information if available
+		if patternText != "" {
+			fmt.Printf(" %s[%s]%s", colorDim, patternText, colorReset)
+		}
+
+		// Add confirmation information if available
+		if confirmationText != "" {
+			fmt.Printf(" %s✓ %s%s", colorDim, confirmationText, colorReset)
+		}
+
+		fmt.Print("\n")
 	}
 }

@@ -124,7 +124,7 @@ func main() {
 
 	// Initialize cache and rate limiter
 	cache = NewCache(1000)
-	limiter = rate.NewLimiter(rate.Limit(4), 8) // 4 QPS with burst of 8
+	limiter = rate.NewLimiter(rate.Limit(8), 16) // 8 QPS with burst of 16
 
 	// Use PORT environment variable if available (for Cloud Run)
 	if *port == "" {
