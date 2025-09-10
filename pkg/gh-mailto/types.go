@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/shurcooL/githubv4"
@@ -289,7 +290,7 @@ func (a *addressAccumulator) toSlice() []Address {
 		for method := range a.methodSet[email] {
 			methods = append(methods, method)
 		}
-		sort.Strings(methods)
+		slices.Sort(methods)
 		addr.Methods = methods
 
 		// Populate Sources from rawEmails BEFORE confidence calculation
@@ -307,11 +308,11 @@ func (a *addressAccumulator) toSlice() []Address {
 	}
 
 	// Sort addresses by decreasing confidence, then by email for consistency
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Confidence == result[j].Confidence {
-			return result[i].Email < result[j].Email
+	slices.SortFunc(result, func(a, b Address) int {
+		if a.Confidence != b.Confidence {
+			return b.Confidence - a.Confidence // Higher confidence first
 		}
-		return result[i].Confidence > result[j].Confidence
+		return strings.Compare(a.Email, b.Email) // Then by email alphabetically
 	})
 
 	return result
@@ -328,6 +329,7 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 		return nil, fmt.Errorf("invalid organization: %w", err)
 	}
 
+	start := time.Now()
 	lu.logger.Info("looking up email addresses",
 		"username", username,
 		"organization", organization,
@@ -359,7 +361,7 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 		)
 	}
 
-	accumulator := &addressAccumulator{
+	acc := &addressAccumulator{
 		addresses: make(map[string]*Address),
 		methodSet: make(map[string]map[string]struct{}),
 		rawEmails: make(map[string]map[string]string),
@@ -372,7 +374,7 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 		err       error
 	}
 
-	resultChan := make(chan methodResult, len(methods))
+	results := make(chan methodResult, len(methods))
 	var wg sync.WaitGroup
 
 	for _, method := range methods {
@@ -380,7 +382,7 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 		go func(m methodInfo) {
 			defer wg.Done()
 			addresses, err := m.fn(ctx, username, organization)
-			resultChan <- methodResult{
+			results <- methodResult{
 				name:      m.name,
 				addresses: addresses,
 				err:       err,
@@ -390,10 +392,10 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 
 	go func() {
 		wg.Wait()
-		close(resultChan)
+		close(results)
 	}()
 
-	for result := range resultChan {
+	for result := range results {
 		if result.err != nil {
 			lu.logger.Warn("lookup method failed",
 				"method", result.name,
@@ -404,15 +406,18 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 			continue
 		}
 		for _, addr := range result.addresses {
-			accumulator.add(addr, result.name)
+			acc.add(addr, result.name)
 		}
 	}
 
-	result.Addresses = accumulator.toSlice()
+	result.Addresses = acc.toSlice()
 
+	duration := time.Since(start)
 	lu.logger.Info("lookup completed",
 		"username", username,
 		"addressesFound", len(result.Addresses),
+		"duration", duration,
+		"methodsUsed", len(methods),
 	)
 
 	return result, nil
@@ -433,7 +438,7 @@ func (r *Result) FilterAndNormalize(opts FilterOptions) *Result {
 	}
 
 	// Use accumulator to handle deduplication and normalization
-	accumulator := &addressAccumulator{
+	acc := &addressAccumulator{
 		addresses: make(map[string]*Address),
 		methodSet: make(map[string]map[string]struct{}),
 		rawEmails: make(map[string]map[string]string),
@@ -471,12 +476,12 @@ func (r *Result) FilterAndNormalize(opts FilterOptions) *Result {
 			Verified: addr.Verified,
 			Sources:  addr.Sources, // Preserve existing sources mapping
 		}
-		accumulator.addWithMethods(processedAddr)
+		acc.addWithMethods(processedAddr)
 	}
 
 	return &Result{
 		Username:  r.Username,
-		Addresses: accumulator.toSlice(),
+		Addresses: acc.toSlice(),
 	}
 }
 
@@ -586,6 +591,7 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 		return nil, fmt.Errorf("invalid domain: %w", err)
 	}
 
+	start := time.Now()
 	lu.logger.Info("guessing email address",
 		"username", username,
 		"organization", organization,
@@ -627,16 +633,25 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 	validatedGuesses := lu.validateGuessesWithGitHub(ctx, guesses)
 	guessResult.Guesses = validatedGuesses
 
+	duration := time.Since(start)
+	lu.logger.Info("guessing completed",
+		"username", username,
+		"domain", opts.Domain,
+		"foundAddresses", len(guessResult.FoundAddresses),
+		"guesses", len(guessResult.Guesses),
+		"duration", duration,
+	)
+
 	return guessResult, nil
 }
 
 // generateIntelligentGuesses creates email guesses based on existing patterns and user info.
 func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string, addresses []Address, targetDomain string) []Address { //nolint:gocognit,revive // Complex email guessing logic
 	// Track guesses by email to combine confidence scores and sources
-	guessMap := make(map[string]*Address)
+	guessMap := make(map[string]*Address, len(addresses)*2) // Estimate 2x addresses for guesses
 
 	// Track addresses we already found to avoid duplicating them as guesses
-	foundEmails := make(map[string]bool)
+	foundEmails := make(map[string]bool, len(addresses))
 	for _, addr := range addresses {
 		foundEmails[strings.ToLower(addr.Email)] = true
 	}
@@ -750,7 +765,7 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 
 	// Strategy 2 & 3: Use names from addresses (populated by lookup methods)
 	// Deduplicate names to avoid combining the same pattern multiple times
-	seenNames := make(map[string]bool)
+	seenNames := make(map[string]bool, len(addresses))
 	for _, addr := range addresses {
 		if addr.Name != "" && !seenNames[addr.Name] {
 			seenNames[addr.Name] = true
@@ -764,7 +779,7 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 	// Strategy 3b: Smart username parsing - try to detect firstname.lastname pattern
 	if username != "" {
 		// Collect known names from addresses to use for intelligent splitting
-		var knownNames []string
+		knownNames := make([]string, 0, len(addresses))
 		for _, addr := range addresses {
 			if addr.Name != "" {
 				knownNames = append(knownNames, addr.Name)
@@ -784,8 +799,8 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 	}
 
 	// Sort guesses by confidence score (highest first)
-	sort.Slice(guesses, func(i, j int) bool {
-		return guesses[i].Confidence > guesses[j].Confidence
+	slices.SortFunc(guesses, func(a, b Address) int {
+		return b.Confidence - a.Confidence
 	})
 
 	return guesses
@@ -1234,7 +1249,7 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 	}
 
 	// Validate that the email actually appears in the content of issues/PRs
-	var validatedIssueMatches, validatedPRMatches int
+	var issueMatches, prMatches int
 	for _, edge := range query.Search.Edges { //nolint:gocritic // Range copying acceptable for readability
 		node := edge.Node
 
@@ -1313,9 +1328,9 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 			}
 
 			if itemType == "issue" {
-				validatedIssueMatches++
+				issueMatches++
 			} else {
-				validatedPRMatches++
+				prMatches++
 			}
 
 			lu.logger.Debug("email validation: confirmed email in content",
@@ -1325,19 +1340,19 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 
 	lu.logger.Debug("email validation: GitHub search completed",
 		"email", guess.Email,
-		"issue_matches", validatedIssueMatches,
-		"pr_matches", validatedPRMatches,
-		"total_matches", validatedIssueMatches+validatedPRMatches)
+		"issue_matches", issueMatches,
+		"pr_matches", prMatches,
+		"total_matches", issueMatches+prMatches)
 
-	totalMatches := validatedIssueMatches + validatedPRMatches
+	totalMatches := issueMatches + prMatches
 	if totalMatches > 0 {
 		// Base confidence starts high due to verification
 		baseConfidence := 75
 
 		// Type bonus: Issues are better evidence than PRs for email ownership
-		if validatedIssueMatches > 0 && validatedPRMatches > 0 { //nolint:gocritic // Boolean conditions better as if-else for readability
+		if issueMatches > 0 && prMatches > 0 { //nolint:gocritic // Boolean conditions better as if-else for readability
 			baseConfidence += 15 // Mixed evidence is strongest
-		} else if validatedIssueMatches > 0 {
+		} else if issueMatches > 0 {
 			baseConfidence += 10 // Issues show ownership
 		} else {
 			baseConfidence += 5 // PRs might be mentions
@@ -1357,14 +1372,14 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 
 		validatedGuess.Confidence = baseConfidence
 		validatedGuess.Sources = map[string]string{
-			"github_search": fmt.Sprintf("issues:%d, prs:%d", validatedIssueMatches, validatedPRMatches),
+			"github_search": fmt.Sprintf("issues:%d, prs:%d", issueMatches, prMatches),
 		}
 
 		lu.logger.Debug("email validation: email validated",
 			"email", guess.Email,
 			"confidence", baseConfidence,
-			"issue_matches", validatedIssueMatches,
-			"pr_matches", validatedPRMatches)
+			"issue_matches", issueMatches,
+			"pr_matches", prMatches)
 	}
 
 	return validatedGuess
@@ -1433,7 +1448,7 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 	}
 
 	// Validate that the email actually appears in the content of issues/PRs
-	var validatedIssueMatches, validatedPRMatches int
+	var issueMatches, prMatches int
 	for _, edge := range query.Search.Edges { //nolint:gocritic // Range copying acceptable for readability
 		node := edge.Node
 		var content, itemType, repoOwner, repoName, itemURL string
@@ -1485,7 +1500,11 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 
 		if emailFound { //nolint:nestif // Complex email validation logic requires nesting
 			// Check if this is a last-name-only email that needs additional validation
-			emailPrefix := strings.Split(guess.Email, "@")[0]
+			parts := strings.Split(guess.Email, "@")
+			if len(parts) == 0 {
+				continue // Should never happen, but be safe
+			}
+			emailPrefix := parts[0]
 			isLastNameOnlyEmail := false
 
 			// Check against user's known names to see if this is a last-name-only email
@@ -1538,9 +1557,9 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 			}
 
 			if itemType == "issue" {
-				validatedIssueMatches++
+				issueMatches++
 			} else {
-				validatedPRMatches++
+				prMatches++
 			}
 			lu.logger.Debug("email validation: found email in content",
 				"email", guess.Email,
@@ -1577,23 +1596,23 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 		}
 	}
 
-	totalMatches := validatedIssueMatches + validatedPRMatches + commitMatches
+	totalMatches := issueMatches + prMatches + commitMatches
 
 	// Always log the search result (even if 0 matches) with breakdown
 	lu.logger.Debug("email validation: GitHub search completed",
 		"email", guess.Email,
-		"issue_matches", validatedIssueMatches,
-		"pr_matches", validatedPRMatches,
+		"issue_matches", issueMatches,
+		"pr_matches", prMatches,
 		"commit_matches", commitMatches,
 		"total_matches", totalMatches)
 
 	if totalMatches > 0 { //nolint:nestif // Complex confidence calculation requires nesting
 		// Calculate confidence based on validation methods using standardized values
 		newConfidence := 0
-		if validatedIssueMatches > 0 {
+		if issueMatches > 0 {
 			newConfidence += ConfidenceIssues
 		}
-		if validatedPRMatches > 0 {
+		if prMatches > 0 {
 			newConfidence += ConfidencePRs
 		}
 		if commitMatches > 0 {
@@ -1613,13 +1632,13 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 
 		// Update methods and pattern to indicate validation type
 		var validationType, methodType string
-		if validatedIssueMatches > 0 && validatedPRMatches > 0 { //nolint:gocritic // Boolean conditions better as if-else for readability
+		if issueMatches > 0 && prMatches > 0 { //nolint:gocritic // Boolean conditions better as if-else for readability
 			validationType = "github_issues_prs_validated"
 			methodType = "github_issues_prs"
-		} else if validatedIssueMatches > 0 {
+		} else if issueMatches > 0 {
 			validationType = "github_issues_validated"
 			methodType = "github_issues"
-		} else if validatedPRMatches > 0 {
+		} else if prMatches > 0 {
 			validationType = "github_prs_validated"
 			methodType = "github_prs"
 		} else {
@@ -1638,7 +1657,11 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 	} else {
 		// Special case: If this is an exact GitHub username match (e.g., tstromberg@google.com for user tstromberg)
 		// and we found commits (even if validation failed), still include it with reduced confidence
-		emailPrefix := strings.Split(validatedGuess.Email, "@")[0]
+		parts := strings.Split(validatedGuess.Email, "@")
+		if len(parts) == 0 {
+			return validatedGuess // Should never happen, but be safe
+		}
+		emailPrefix := parts[0]
 		if strings.EqualFold(emailPrefix, lu.currentUsername) && commitMatches > 0 {
 			validatedGuess.Confidence = 70 // Moderate confidence for username match with commits found
 			validatedGuess.Pattern += "_username_commits_found"
@@ -2135,8 +2158,8 @@ func CombineAndFilterGuessResults(result *GuessResult, domain string) ([]Address
 	}
 
 	// Sort by confidence (highest first)
-	sort.Slice(allResults, func(i, j int) bool {
-		return allResults[i].Confidence > allResults[j].Confidence
+	slices.SortFunc(allResults, func(a, b Address) int {
+		return b.Confidence - a.Confidence
 	})
 
 	// Filter results to show only high-confidence ones if any exist above 60%

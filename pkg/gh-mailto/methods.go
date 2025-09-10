@@ -596,7 +596,11 @@ func (lu *Lookup) isCommitRelatedToUser(item struct { //nolint:unused // Used by
 
 	// Check 1.5: Does the email prefix match the GitHub username?
 	// This handles cases like tstromberg@google.com for user tstromberg
-	emailPrefix := strings.Split(email, "@")[0]
+	parts := strings.Split(email, "@")
+	if len(parts) == 0 {
+		return false // Should never happen, but be safe
+	}
+	emailPrefix := parts[0]
 	if strings.EqualFold(emailPrefix, lu.currentUsername) {
 		lu.logger.Debug("commit related to user via email prefix matching username",
 			"email", email, "email_prefix", emailPrefix, "username", lu.currentUsername)

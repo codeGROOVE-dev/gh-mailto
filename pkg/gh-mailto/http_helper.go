@@ -59,7 +59,7 @@ func (lu *Lookup) doRequestWithAccept(ctx context.Context, method, url string, b
 		retry.Attempts(5),
 		retry.Delay(100*time.Millisecond),
 		retry.MaxDelay(2*time.Minute),
-		retry.DelayType(retry.BackOffDelay),
+		retry.DelayType(retry.FullJitterBackoffDelay),
 		retry.Context(ctx),
 	)
 	if err != nil {
@@ -125,11 +125,17 @@ func (lu *Lookup) doGraphQLQueryWithRetry(ctx context.Context, client interface 
 		func() error {
 			err := client.Query(ctx, query, variables)
 			if err != nil {
+				errStr := strings.ToLower(err.Error())
 				// Check if it's a rate limit error that should be retried
-				if strings.Contains(err.Error(), "rate limit") ||
-					strings.Contains(err.Error(), "timeout") ||
-					strings.Contains(err.Error(), "connection") ||
-					strings.Contains(err.Error(), "temporary") {
+				if strings.Contains(errStr, "rate limit") ||
+					strings.Contains(errStr, "rate_limit") ||
+					strings.Contains(errStr, "timeout") ||
+					strings.Contains(errStr, "connection") ||
+					strings.Contains(errStr, "temporary") ||
+					strings.Contains(errStr, "server error") ||
+					strings.Contains(errStr, "502") ||
+					strings.Contains(errStr, "503") ||
+					strings.Contains(errStr, "504") {
 					lu.logger.Debug("GraphQL query failed with retryable error", "error", err)
 					return err // Retry
 				}
@@ -139,10 +145,10 @@ func (lu *Lookup) doGraphQLQueryWithRetry(ctx context.Context, client interface 
 			}
 			return nil
 		},
-		retry.Attempts(3), // Fewer attempts for GraphQL since it's more expensive
+		retry.Attempts(5),
 		retry.Delay(200*time.Millisecond),
-		retry.MaxDelay(30*time.Second), // Shorter max delay for GraphQL
-		retry.DelayType(retry.BackOffDelay),
+		retry.MaxDelay(2*time.Minute),
+		retry.DelayType(retry.FullJitterBackoffDelay),
 		retry.Context(ctx),
 	)
 }

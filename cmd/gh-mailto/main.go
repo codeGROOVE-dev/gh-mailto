@@ -273,7 +273,7 @@ func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 	allResults, showWarning := ghmailto.CombineAndFilterGuessResults(result, domain)
 
 	if len(allResults) == 0 {
-		printNoGuessesMessageModern()
+		fmt.Printf("%sNo email guesses could be generated%s\n", colorDim, colorReset)
 		return
 	}
 
@@ -291,9 +291,4 @@ func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 			colorBold+colorWhite, result.Email, colorReset,
 			colorDim, sourceText, colorReset)
 	}
-}
-
-// printNoGuessesMessageModern prints a simple message when no guesses are generated.
-func printNoGuessesMessageModern() {
-	fmt.Printf("%sNo email guesses could be generated%s\n", colorDim, colorReset)
 }
