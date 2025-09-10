@@ -170,6 +170,61 @@ func main() {
 			}
 			return strings.Join(formattedMethods, ", ")
 		},
+		"formatPattern": func(pattern string) string {
+			// Convert technical patterns to user-friendly display names
+			switch pattern {
+			case "first.last":
+				return "First.Last"
+			case "first":
+				return "FirstName"
+			case "flast":
+				return "FirstnameLastname"
+			case "last":
+				return "LastName"
+			case "initials":
+				return "F.L."
+			case "firstlast":
+				return "FirstnameLastname"
+			case "github_username_exact":
+				return "GitHub Username"
+			case "github_username_prefix":
+				return "GitHub Username Prefix"
+			case "same_prefix_as_other_domain":
+				return "Same Prefix"
+			case "single_name":
+				return "Single Name"
+			case "parsed_username":
+				return "Parsed Username"
+			case "profile_parsed_username":
+				return "Profile-Based Parse"
+			case "git_commits":
+				return "Discovery (actual email found)"
+			case "git_commits_multi_method":
+				return "Discovery (actual email found)"
+			default:
+				return pattern
+			}
+		},
+		"formatConfirmationSource": func(sources map[string]string, pattern string) string {
+			// Look for confirmation sources that indicate where the email was validated
+			if _, exists := sources["github_search"]; exists {
+				return "GitHub Issues/PRs"
+			}
+			if _, exists := sources["batched_github_search"]; exists {
+				return "GitHub Issues/PRs"
+			}
+			if _, exists := sources["commit_search"]; exists {
+				return "Git Commits"
+			}
+			if _, exists := sources["github_commits_found"]; exists {
+				return "Git Commits"
+			}
+			// If pattern indicates git commits, show that as source
+			if strings.Contains(pattern, "git_commits") {
+				return "Git Commits"
+			}
+			return ""
+		},
 		"formatSources": func(sources map[string]string) string {
 			var sourceList []string
 
