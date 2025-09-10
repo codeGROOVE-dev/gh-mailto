@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/codeGROOVE-dev/retry"
@@ -113,4 +114,35 @@ func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url strin
 	}
 
 	return nil
+}
+
+// doGraphQLQueryWithRetry performs a GraphQL query with retry logic for reliability.
+func (lu *Lookup) doGraphQLQueryWithRetry(ctx context.Context, client interface {
+	Query(ctx context.Context, q interface{}, variables map[string]interface{}) error
+}, query interface{}, variables map[string]interface{},
+) error {
+	return retry.Do(
+		func() error {
+			err := client.Query(ctx, query, variables)
+			if err != nil {
+				// Check if it's a rate limit error that should be retried
+				if strings.Contains(err.Error(), "rate limit") ||
+					strings.Contains(err.Error(), "timeout") ||
+					strings.Contains(err.Error(), "connection") ||
+					strings.Contains(err.Error(), "temporary") {
+					lu.logger.Debug("GraphQL query failed with retryable error", "error", err)
+					return err // Retry
+				}
+				// Non-retryable errors (e.g., authentication, syntax errors)
+				lu.logger.Debug("GraphQL query failed with non-retryable error", "error", err)
+				return retry.Unrecoverable(err)
+			}
+			return nil
+		},
+		retry.Attempts(3), // Fewer attempts for GraphQL since it's more expensive
+		retry.Delay(200*time.Millisecond),
+		retry.MaxDelay(30*time.Second), // Shorter max delay for GraphQL
+		retry.DelayType(retry.BackOffDelay),
+		retry.Context(ctx),
+	)
 }

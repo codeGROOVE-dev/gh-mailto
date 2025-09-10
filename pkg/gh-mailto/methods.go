@@ -224,7 +224,7 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 		"limit":    githubv4.Int(100),
 	}
 
-	err := client.Query(ctx, &query, variables)
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (lu *Lookup) lookupViaOrgVerifiedDomains(ctx context.Context, username, org
 		"org":      githubv4.String(organization),
 	}
 
-	err := client.Query(ctx, &query, variables)
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
 	if err != nil {
 		return nil, err
 	}

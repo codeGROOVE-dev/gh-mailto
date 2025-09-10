@@ -509,13 +509,13 @@ func TestGenerateNameBasedGuesses(t *testing.T) {
 			name:     "normal two-part name",
 			realName: "Thomas Stromberg",
 			domain:   "example.com",
-			expected: []string{"thomas.stromberg@example.com", "thomasstromberg@example.com", "tstromberg@example.com", "thomas@example.com", "stromberg@example.com", "ts@example.com"},
+			expected: []string{"thomas.stromberg@example.com", "thomas@example.com", "tstromberg@example.com", "stromberg@example.com", "ts@example.com", "thomasstromberg@example.com"},
 		},
 		{
 			name:     "three-part name",
 			realName: "John Doe Smith",
 			domain:   "example.com",
-			expected: []string{"john.smith@example.com", "johnsmith@example.com", "jsmith@example.com", "john@example.com", "smith@example.com", "js@example.com"},
+			expected: []string{"john.smith@example.com", "john@example.com", "jsmith@example.com", "smith@example.com", "js@example.com", "johnsmith@example.com"},
 		},
 		{
 			name:     "single letter first name",
@@ -666,7 +666,7 @@ func TestSkipGitHubNoreplyInPrefixGuessing(t *testing.T) {
 		{Email: "real.user@other.com", Name: "Real User", Methods: []string{"commits"}},
 	}
 
-	lookup := &Lookup{}
+	lookup := New("fake-token")
 	guesses := lookup.generateIntelligentGuesses(context.Background(), "golanglemonade", addresses, "example.com")
 
 	// Should not include 147884153@example.com (from GitHub noreply ID)
@@ -715,7 +715,7 @@ func TestSkipGenericPrefixesInGuessing(t *testing.T) {
 		{Email: "realuser@somewhere.org"}, // Should be used - not generic
 	}
 
-	lookup := &Lookup{}
+	lookup := New("fake-token")
 	guesses := lookup.generateIntelligentGuesses(context.Background(), "testuser", addresses, "target.com")
 
 	// Track which guesses we found
@@ -854,7 +854,7 @@ func TestRealWorldGitHubNoreplyCase(t *testing.T) {
 		{Email: "", Name: "Matt Anderson", Methods: []string{"public_api"}, Verified: false},
 	}
 
-	lookup := &Lookup{}
+	lookup := New("fake-token")
 	guesses := lookup.generateIntelligentGuesses(context.Background(), "matoszz", addresses, "theopenlane.io")
 
 	// Debug: log all guesses
@@ -886,5 +886,152 @@ func TestRealWorldGitHubNoreplyCase(t *testing.T) {
 	}
 	if !hasNameBasedGuess {
 		t.Error("Should generate name-based guesses from Matt Anderson")
+	}
+}
+
+func TestContainsEmail(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		email    string
+		expected bool
+	}{
+		{
+			name:     "exact match",
+			content:  "Contact me at john@example.com for details",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "substring false positive - should not match",
+			content:  "Contact me at kjohn@example.com for details",
+			email:    "john@example.com",
+			expected: false,
+		},
+		{
+			name:     "kimsterv case - klewandowski vs lewandowski",
+			content:  "Please reach out to klewandowski@google.com for more info",
+			email:    "lewandowski@google.com",
+			expected: false,
+		},
+		{
+			name:     "kimsterv case - klewandowski exact match",
+			content:  "Please reach out to klewandowski@google.com for more info",
+			email:    "klewandowski@google.com",
+			expected: true,
+		},
+		{
+			name:     "email at start of content",
+			content:  "john@example.com is the contact person",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "email at end of content",
+			content:  "The contact person is john@example.com",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "email with punctuation boundaries",
+			content:  "Email: john@example.com, Phone: 555-1234",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "case insensitive matching",
+			content:  "Contact JOHN@EXAMPLE.COM for details",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "no match",
+			content:  "Contact jane@example.com for details",
+			email:    "john@example.com",
+			expected: false,
+		},
+		{
+			name:     "multiple occurrences with one valid",
+			content:  "Don't use kjohn@example.com, use john@example.com instead",
+			email:    "john@example.com",
+			expected: true,
+		},
+		{
+			name:     "email prefix with alphanumeric - should not match",
+			content:  "The account test123john@example.com is invalid",
+			email:    "john@example.com",
+			expected: false,
+		},
+		{
+			name:     "email suffix with alphanumeric - should not match",
+			content:  "The account john@example.com456 is invalid",
+			email:    "john@example.com",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := containsEmail(tt.content, tt.email)
+			if result != tt.expected {
+				t.Errorf("containsEmail(%q, %q) = %v; want %v", tt.content, tt.email, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEmailValidationNoSubstringRegression(t *testing.T) {
+	// This test specifically covers the kimsterv regression case
+	// to ensure we don't accidentally validate lewandowski@google.com
+	// when the content only contains klewandowski@google.com
+
+	// Simulate GitHub search results that contain klewandowski@google.com
+	testContent := `
+	Issue Title: Update team contact information
+	Issue Body: Please update the team contacts. 
+	
+	For technical questions, reach out to klewandowski@google.com
+	For administrative questions, contact admin@google.com
+	
+	Thanks!
+	`
+
+	emails := []string{
+		"klewandowski@google.com", // Should match - exact match
+		"lewandowski@google.com",  // Should NOT match - substring of klewandowski
+		"admin@google.com",        // Should match - exact match
+		"missing@google.com",      // Should NOT match - not in content
+	}
+
+	expectedMatches := map[string]bool{
+		"klewandowski@google.com": true,
+		"lewandowski@google.com":  false, // This is the regression test
+		"admin@google.com":        true,
+		"missing@google.com":      false,
+	}
+
+	for _, email := range emails {
+		result := containsEmail(testContent, email)
+		expected := expectedMatches[email]
+
+		if result != expected {
+			if email == "lewandowski@google.com" && result == true {
+				t.Fatalf("REGRESSION: lewandowski@google.com incorrectly matched when content only has klewandowski@google.com")
+			}
+			t.Errorf("Email %s: expected %v, got %v", email, expected, result)
+		}
+	}
+
+	// Additional test with more complex boundaries
+	complexContent := "The emails are: alice@test.com, bob.alice@test.com, and alice@test.com.backup"
+
+	// alice@test.com should match the exact occurrences but not the substring in bob.alice@test.com or alice@test.com.backup
+	if !containsEmail(complexContent, "alice@test.com") {
+		t.Error("Should find exact matches for alice@test.com")
+	}
+
+	// Verify it doesn't match partial strings
+	if containsEmail("user.alice@test.com only", "alice@test.com") {
+		t.Error("Should not match alice@test.com in user.alice@test.com")
 	}
 }

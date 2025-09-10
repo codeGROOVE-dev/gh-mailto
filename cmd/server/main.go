@@ -312,17 +312,18 @@ func handlePostRequest(request *http.Request, logger *slog.Logger) PageData {
 		if err != nil {
 			data.Error = fmt.Sprintf("Guess failed: %v", err)
 		} else {
-			// Filter high-confidence results for guesses
-			filteredGuesses, showWarning1 := filterHighConfidenceAddresses(guessResult.Guesses)
-			guessResult.Guesses = filteredGuesses
+			// Use the same filtering logic as the CLI
+			combinedResults, showWarning := ghmailto.CombineAndFilterGuessResults(guessResult, domain)
 
-			// Also filter found addresses if any
-			filteredFound, showWarning2 := filterHighConfidenceAddresses(guessResult.FoundAddresses)
-			guessResult.FoundAddresses = filteredFound
+			// Create a new GuessResult with the combined filtered results
+			// We need to split them back for display purposes, but they're already properly filtered
+			filteredResult := &ghmailto.GuessResult{
+				FoundAddresses: []ghmailto.Address{},
+				Guesses:        combinedResults, // Put all results in Guesses for unified display
+			}
 
-			// Show warning if either set shows low-confidence results
-			data.LowConfidenceWarning = showWarning1 || showWarning2
-			data.Results = guessResult
+			data.LowConfidenceWarning = showWarning
+			data.Results = filteredResult
 		}
 	} else {
 		result, err := lookup.Lookup(ctx, username, "")
@@ -334,8 +335,8 @@ func handlePostRequest(request *http.Request, logger *slog.Logger) PageData {
 				Domain: domain,
 			})
 
-			// Filter high-confidence results
-			filteredAddresses, showWarning := filterHighConfidenceAddresses(filteredResult.Addresses)
+			// Filter high-confidence results using the shared function
+			filteredAddresses, showWarning := ghmailto.FilterHighConfidenceAddresses(filteredResult.Addresses)
 			filteredResult.Addresses = filteredAddresses
 			data.LowConfidenceWarning = showWarning
 
@@ -368,31 +369,4 @@ func getGHToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no GITHUB_TOKEN environment variable and gh auth token failed: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
-}
-
-// filterHighConfidenceAddresses filters results to show only high-confidence ones (>60%)
-// if any exist, otherwise returns all results and a flag indicating if filtering occurred.
-func filterHighConfidenceAddresses(addresses []ghmailto.Address) ([]ghmailto.Address, bool) {
-	// Check if any addresses have confidence > 60%
-	hasHighConfidence := false
-	for _, addr := range addresses {
-		if addr.Confidence > 60 {
-			hasHighConfidence = true
-			break
-		}
-	}
-
-	// If we have high-confidence results, filter to show only those
-	if hasHighConfidence {
-		var filtered []ghmailto.Address
-		for _, addr := range addresses {
-			if addr.Confidence > 60 {
-				filtered = append(filtered, addr)
-			}
-		}
-		return filtered, false // false = no warning needed, showing high confidence results
-	}
-
-	// Otherwise, return all results with warning flag
-	return addresses, len(addresses) > 0 // true = show warning if we have results but none are high confidence
 }

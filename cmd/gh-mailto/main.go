@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
@@ -185,7 +184,7 @@ func printResults(result *ghmailto.Result, username, org string) {
 	}
 
 	// Filter results to show only high-confidence ones if any exist above 60%
-	addressesToShow, showLowConfidenceWarning := filterHighConfidenceResults(result.Addresses)
+	addressesToShow, showLowConfidenceWarning := ghmailto.FilterHighConfidenceAddresses(result.Addresses)
 
 	// Show warning if we're displaying low-confidence results
 	if showLowConfidenceWarning {
@@ -195,21 +194,11 @@ func printResults(result *ghmailto.Result, username, org string) {
 
 	// Display addresses with clean Unix-style formatting
 	for _, addr := range addressesToShow {
-		if showLowConfidenceWarning {
-			// Simple bullet format for low-confidence results
-			sourceText := extractSourceText(addr)
-			fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
-				addr.Confidence,
-				colorBold+colorWhite, addr.Email, colorReset,
-				colorDim, sourceText, colorReset)
-		} else {
-			// Use same simple format for high-confidence results
-			sourceText := extractSourceText(addr)
-			fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
-				addr.Confidence,
-				colorBold+colorWhite, addr.Email, colorReset,
-				colorDim, sourceText, colorReset)
-		}
+		sourceText := extractSourceText(addr)
+		fmt.Printf("• %d%% - %s%s%s: %s%s%s\n",
+			addr.Confidence,
+			colorBold+colorWhite, addr.Email, colorReset,
+			colorDim, sourceText, colorReset)
 	}
 	fmt.Println()
 }
@@ -367,74 +356,24 @@ func extractSourceText(addr ghmailto.Address) string {
 
 // printGuessResults displays the guess results in a formatted manner.
 func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
-	// Filter found addresses by domain if specified
-	filteredFoundAddresses := result.FoundAddresses
-	if domain != "" {
-		var filtered []ghmailto.Address
-		for _, addr := range result.FoundAddresses {
-			// Extract domain from email address
-			atIndex := strings.LastIndex(addr.Email, "@")
-			if atIndex != -1 && atIndex < len(addr.Email)-1 {
-				emailDomain := addr.Email[atIndex+1:]
-				if strings.EqualFold(emailDomain, domain) {
-					filtered = append(filtered, addr)
-				}
-			}
-		}
-		filteredFoundAddresses = filtered
-	}
-
-	// Combine all results (guesses + found addresses) into a single list
-	var allResults []ghmailto.Address
-	seen := make(map[string]bool)
-
-	// Add found addresses first (they have priority over guesses)
-	for _, addr := range filteredFoundAddresses {
-		email := strings.ToLower(addr.Email)
-		if !seen[email] {
-			allResults = append(allResults, addr)
-			seen[email] = true
-		}
-	}
-
-	// Add guesses (skip if already seen as found address)
-	for _, guess := range result.Guesses {
-		email := strings.ToLower(guess.Email)
-		if !seen[email] {
-			allResults = append(allResults, guess)
-			seen[email] = true
-		}
-	}
+	// Use the shared filtering logic
+	allResults, showWarning := ghmailto.CombineAndFilterGuessResults(result, domain)
 
 	if len(allResults) == 0 {
 		printNoGuessesMessageModern()
 		return
 	}
 
-	// Sort by confidence (highest first)
-	sort.Slice(allResults, func(i, j int) bool {
-		return allResults[i].Confidence > allResults[j].Confidence
-	})
-
-	// Display unified results
-	printUnifiedResults(allResults)
-}
-
-// printUnifiedResults displays all results (guesses + found addresses) sorted by confidence.
-func printUnifiedResults(results []ghmailto.Address) {
-	// Filter results to show only high-confidence ones if any exist above 60%
-	resultsToShow, showLowConfidenceWarning := filterHighConfidenceResults(results)
-
 	// Show warning if we're displaying low-confidence results
-	if showLowConfidenceWarning {
+	if showWarning {
 		fmt.Printf("%s⚠️  No high confidence addresses found, showing all possibilities:%s\n\n",
 			colorYellow, colorReset)
 	}
 
 	// Use same simple format for all results
-	for _, result := range resultsToShow {
+	for _, result := range allResults {
 		sourceText := extractSourceText(result)
-		fmt.Printf("* %d%% - %s%s%s: %s%s%s\n",
+		fmt.Printf("• %d%% - %s%s%s: %s%s%s\n",
 			result.Confidence,
 			colorBold+colorWhite, result.Email, colorReset,
 			colorDim, sourceText, colorReset)
@@ -444,31 +383,4 @@ func printUnifiedResults(results []ghmailto.Address) {
 // printNoGuessesMessageModern prints a simple message when no guesses are generated.
 func printNoGuessesMessageModern() {
 	fmt.Printf("%sNo email guesses could be generated%s\n", colorDim, colorReset)
-}
-
-// filterHighConfidenceResults filters results to show only high-confidence ones (>60%)
-// if any exist, otherwise returns all results and a flag indicating if filtering occurred.
-func filterHighConfidenceResults(addresses []ghmailto.Address) ([]ghmailto.Address, bool) {
-	// Check if any addresses have confidence > 60%
-	hasHighConfidence := false
-	for _, addr := range addresses {
-		if addr.Confidence > 60 {
-			hasHighConfidence = true
-			break
-		}
-	}
-
-	// If we have high-confidence results, filter to show only those
-	if hasHighConfidence {
-		var filtered []ghmailto.Address
-		for _, addr := range addresses {
-			if addr.Confidence > 60 {
-				filtered = append(filtered, addr)
-			}
-		}
-		return filtered, false // false = no warning needed, showing high confidence results
-	}
-
-	// Otherwise, return all results with warning flag
-	return addresses, len(addresses) > 0 // true = show warning if we have results but none are high confidence
 }

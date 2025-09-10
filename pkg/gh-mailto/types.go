@@ -1019,14 +1019,62 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 		return guesses
 	}
 
-	lu.logger.Debug("validating guesses with GitHub GraphQL", "count", len(guesses))
+	lu.logger.Debug("validating guesses with GitHub (batched)", "count", len(guesses))
 
 	var validatedGuesses []Address
 	var unvalidatedGuesses []Address
 
+	// Batch commit searches - extract emails for combined search
+	emails := make([]string, len(guesses))
+	for i, guess := range guesses {
+		emails[i] = guess.Email
+	}
+
+	// GitHub limits OR operators to 5, so we need to chunk the emails
+	// We can batch 4 emails per request (5 OR operators = author + 4 emails)
+	emailFoundInCommits := make(map[string]bool)
+	chunkSize := 4
+	for i := 0; i < len(emails); i += chunkSize {
+		end := i + chunkSize
+		if end > len(emails) {
+			end = len(emails)
+		}
+		chunk := emails[i:end]
+
+		chunkResults, _, _ := lu.searchCombinedCommits(ctx, lu.currentUsername, "", chunk)
+		// Merge results
+		for email, found := range chunkResults {
+			emailFoundInCommits[email] = found
+		}
+	}
+	lu.logger.Debug("batched commit search completed", "found_emails", len(emailFoundInCommits), "total_searched", len(emails), "chunks", (len(emails)+chunkSize-1)/chunkSize)
+
+	// Batch GraphQL searches for issues/PRs - combine all emails into single queries
+	// GraphQL also has OR operator limits, so chunk the GraphQL searches too
+	emailIssuesPRMatches := lu.batchedGraphQLSearch(ctx, emails)
+
 	for _, guess := range guesses {
-		// Search for the guessed email in issues and PRs
-		validatedGuess := lu.searchEmailInGitHub(ctx, guess)
+		// Check if email was found in batched commit search
+		commitMatches := 0
+		if emailFoundInCommits[guess.Email] {
+			commitMatches = 1
+			lu.logger.Debug("email found via batched commit search", "email", guess.Email)
+		}
+
+		// Check GraphQL search results
+		validatedGuess := guess
+		if issuesPRResult, found := emailIssuesPRMatches[guess.Email]; found {
+			validatedGuess.Confidence = issuesPRResult.Confidence
+			validatedGuess.Sources = issuesPRResult.Sources
+			lu.logger.Debug("email found via batched GraphQL search", "email", guess.Email, "confidence", issuesPRResult.Confidence)
+		}
+
+		// Add commit validation results
+		if commitMatches > 0 && validatedGuess.Confidence == 0 {
+			// Found in commits but not in issues/PRs - give it some confidence
+			validatedGuess.Confidence = 25 // Medium confidence for commit-only validation
+			validatedGuess.Sources = map[string]string{"commit_search": "found via batched commit search"}
+		}
 
 		if validatedGuess.Confidence > 0 {
 			validatedGuesses = append(validatedGuesses, validatedGuess)
@@ -1114,8 +1162,8 @@ func (lu *Lookup) scaleUnvalidatedConfidence(unvalidatedGuesses []Address) []Add
 	return scaledGuesses
 }
 
-// searchEmailInGitHub searches for an email address in GitHub issues and PRs using GraphQL.
-func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Address {
+// searchEmailInGitHubIssuesPRs searches for an email address in GitHub issues and PRs using GraphQL only.
+func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Address) Address {
 	// Create a copy of the guess to modify
 	validatedGuess := guess
 
@@ -1167,6 +1215,202 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 	}
 
 	// Search for the email address in issues and PRs only
+	searchQuery := fmt.Sprintf(`%q type:issue,pr`, guess.Email)
+	variables := map[string]any{
+		"query": githubv4.String(searchQuery),
+	}
+
+	lu.logger.Debug("email validation: executing GraphQL query",
+		"email", guess.Email,
+		"query", searchQuery)
+
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	if err != nil {
+		lu.logger.Debug("GitHub GraphQL search failed", "email", guess.Email, "error", err)
+		return validatedGuess
+	}
+
+	// Validate that the email actually appears in the content of issues/PRs
+	var validatedIssueMatches, validatedPRMatches int
+	for _, edge := range query.Search.Edges {
+		node := edge.Node
+
+		var content, itemType string
+		var number int
+		var repoOwner, repoName, itemURL string
+
+		switch node.Typename {
+		case "Issue":
+			content = node.Issue.Title + " " + node.Issue.Body
+			itemType = "issue"
+			number = node.Issue.Number
+			repoOwner = node.Issue.Repository.Owner.Login
+			repoName = node.Issue.Repository.Name
+			itemURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, number)
+		case "PullRequest":
+			content = node.PullRequest.Title + " " + node.PullRequest.Body
+			itemType = "pr"
+			number = node.PullRequest.Number
+			repoOwner = node.PullRequest.Repository.Owner.Login
+			repoName = node.PullRequest.Repository.Name
+			itemURL = fmt.Sprintf("https://github.com/%s/%s/pull/%d", repoOwner, repoName, number)
+		}
+
+		// Validate email appears in content with proper boundaries
+		emailFound := containsEmail(content, guess.Email)
+
+		if emailFound {
+			// Additional validation for last-name-only emails to reduce false positives
+			atIndex := strings.Index(guess.Email, "@")
+			if atIndex > 0 {
+				emailPrefix := guess.Email[:atIndex]
+				if len(strings.Split(emailPrefix, ".")) == 1 && len(emailPrefix) < 8 {
+					// This looks like a last-name-only email - validate more strictly
+					contentLower := strings.ToLower(content)
+					username := strings.ToLower(lu.currentUsername)
+
+					// Extract likely first name from current user names for validation
+					var firstName, lastName string
+					if len(lu.currentUserNames) > 0 {
+						fullName := lu.currentUserNames[0]
+						nameParts := strings.Fields(fullName)
+						if len(nameParts) >= 2 {
+							firstName = strings.ToLower(nameParts[0])
+							lastName = strings.ToLower(nameParts[len(nameParts)-1])
+						}
+					}
+
+					// Validate with additional context
+					directMatch := strings.Contains(contentLower, firstName) || strings.Contains(contentLower, username)
+
+					// Check for nickname variations
+					nicknameMatch := false
+					if len(firstName) > 3 {
+						for i := 3; i <= len(firstName); i++ {
+							prefix := firstName[:i]
+							if strings.Contains(contentLower, prefix) {
+								nicknameMatch = true
+								lu.logger.Debug("email validation: last-name-only email validated with nickname context",
+									"email", guess.Email, "last_name", lastName, "first_name", firstName, "prefix", prefix, "username", username,
+									"type", itemType, "number", number, "url", itemURL)
+								break
+							}
+						}
+					}
+
+					if !directMatch && !nicknameMatch {
+						lu.logger.Debug("email validation: last-name-only email found but lacks context validation",
+							"email", guess.Email, "last_name", lastName, "first_name", firstName, "username", username,
+							"type", itemType, "number", number, "url", itemURL)
+						continue // Skip this match
+					}
+				}
+			}
+
+			if itemType == "issue" {
+				validatedIssueMatches++
+			} else {
+				validatedPRMatches++
+			}
+
+			lu.logger.Debug("email validation: confirmed email in content",
+				"email", guess.Email, "type", itemType, "number", number, "url", itemURL)
+		}
+	}
+
+	lu.logger.Debug("email validation: GitHub search completed",
+		"email", guess.Email,
+		"issue_matches", validatedIssueMatches,
+		"pr_matches", validatedPRMatches,
+		"total_matches", validatedIssueMatches+validatedPRMatches)
+
+	totalMatches := validatedIssueMatches + validatedPRMatches
+	if totalMatches > 0 {
+		// Base confidence starts high due to verification
+		baseConfidence := 75
+
+		// Type bonus: Issues are better evidence than PRs for email ownership
+		if validatedIssueMatches > 0 && validatedPRMatches > 0 {
+			baseConfidence += 15 // Mixed evidence is strongest
+		} else if validatedIssueMatches > 0 {
+			baseConfidence += 10 // Issues show ownership
+		} else {
+			baseConfidence += 5 // PRs might be mentions
+		}
+
+		// Volume bonus: More matches = higher confidence
+		if totalMatches >= 3 {
+			baseConfidence += 10
+		} else if totalMatches == 2 {
+			baseConfidence += 5
+		}
+
+		// Cap at reasonable maximum
+		if baseConfidence > 95 {
+			baseConfidence = 95
+		}
+
+		validatedGuess.Confidence = baseConfidence
+		validatedGuess.Sources = map[string]string{
+			"github_search": fmt.Sprintf("issues:%d, prs:%d", validatedIssueMatches, validatedPRMatches),
+		}
+
+		lu.logger.Debug("email validation: email validated",
+			"email", guess.Email,
+			"confidence", baseConfidence,
+			"issue_matches", validatedIssueMatches,
+			"pr_matches", validatedPRMatches)
+	}
+
+	return validatedGuess
+}
+
+// searchEmailInGitHub searches for an email address in GitHub issues, PRs and commits.
+// This function combines GraphQL search for issues/PRs with individual commit search.
+func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Address {
+	// First try GraphQL search for issues/PRs
+	validatedGuess := lu.searchEmailInGitHubIssuesPRs(ctx, guess)
+
+	// Use GraphQL to search for the email in issues and PRs
+	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: lu.token})
+	httpClient := oauth2.NewClient(ctx, src)
+	client := githubv4.NewClient(httpClient)
+
+	// GraphQL query to search issues and PRs and get their content for validation
+	var query struct {
+		Search struct {
+			IssueCount int
+			Edges      []struct {
+				Node struct {
+					Typename string `graphql:"__typename"`
+					Issue    struct {
+						Number     int
+						Title      string
+						Body       string
+						Repository struct {
+							Name  string
+							Owner struct {
+								Login string
+							}
+						}
+					} `graphql:"... on Issue"`
+					PullRequest struct {
+						Number     int
+						Title      string
+						Body       string
+						Repository struct {
+							Name  string
+							Owner struct {
+								Login string
+							}
+						}
+					} `graphql:"... on PullRequest"`
+				}
+			}
+		} `graphql:"search(query: $query, type: ISSUE, first: 10)"`
+	}
+
+	// Search for the email address in issues and PRs only
 	// Commits are not supported in GitHub's search API with GraphQL
 	searchQuery := fmt.Sprintf(`%q type:issue,pr`, guess.Email)
 	variables := map[string]any{
@@ -1177,7 +1421,7 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 		"email", guess.Email,
 		"query", searchQuery)
 
-	err := client.Query(ctx, &query, variables)
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
 	if err != nil {
 		lu.logger.Debug("GitHub GraphQL search failed", "email", guess.Email, "error", err)
 		return validatedGuess
@@ -1392,6 +1636,182 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 	}
 
 	return validatedGuess
+}
+
+// batchedGraphQLSearch performs batched GraphQL searches for multiple emails to reduce API calls.
+func (lu *Lookup) batchedGraphQLSearch(ctx context.Context, emails []string) map[string]Address {
+	results := make(map[string]Address)
+
+	if len(emails) == 0 {
+		return results
+	}
+
+	// GraphQL also has OR operator limits, so chunk emails
+	// We can safely batch 3-4 emails per GraphQL query to stay under limits
+	chunkSize := 3
+
+	for i := 0; i < len(emails); i += chunkSize {
+		end := i + chunkSize
+		if end > len(emails) {
+			end = len(emails)
+		}
+		chunk := emails[i:end]
+
+		// Build combined search query for this chunk
+		var queryParts []string
+		for _, email := range chunk {
+			queryParts = append(queryParts, fmt.Sprintf(`%q`, email))
+		}
+		combinedQuery := strings.Join(queryParts, " OR ") + " type:issue,pr"
+
+		lu.logger.Debug("batched GraphQL search", "query", combinedQuery, "emails", len(chunk))
+
+		// Execute GraphQL query for this chunk
+		chunkResults := lu.executeBatchedGraphQLQuery(ctx, combinedQuery, chunk)
+
+		// Merge results
+		for email, result := range chunkResults {
+			results[email] = result
+		}
+	}
+
+	lu.logger.Debug("batched GraphQL search completed", "total_emails", len(emails), "found_emails", len(results), "chunks", (len(emails)+chunkSize-1)/chunkSize)
+	return results
+}
+
+// executeBatchedGraphQLQuery executes a single GraphQL query for multiple emails and parses results.
+func (lu *Lookup) executeBatchedGraphQLQuery(ctx context.Context, searchQuery string, emails []string) map[string]Address {
+	results := make(map[string]Address)
+
+	// Use GraphQL to search for the emails in issues and PRs
+	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: lu.token})
+	httpClient := oauth2.NewClient(ctx, src)
+	client := githubv4.NewClient(httpClient)
+
+	// GraphQL query to search issues and PRs
+	var query struct {
+		Search struct {
+			IssueCount int
+			Edges      []struct {
+				Node struct {
+					Typename string `graphql:"__typename"`
+					Issue    struct {
+						Number     int
+						Title      string
+						Body       string
+						Repository struct {
+							Name  string
+							Owner struct {
+								Login string
+							}
+						}
+					} `graphql:"... on Issue"`
+					PullRequest struct {
+						Number     int
+						Title      string
+						Body       string
+						Repository struct {
+							Name  string
+							Owner struct {
+								Login string
+							}
+						}
+					} `graphql:"... on PullRequest"`
+				}
+			}
+		} `graphql:"search(query: $query, type: ISSUE, first: 30)"` // Increased limit for batched search
+	}
+
+	variables := map[string]any{
+		"query": githubv4.String(searchQuery),
+	}
+
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	if err != nil {
+		lu.logger.Debug("batched GraphQL search failed", "error", err, "query", searchQuery)
+		return results
+	}
+
+	// Count matches per email
+	emailMatches := make(map[string]struct {
+		issueMatches int
+		prMatches    int
+	})
+
+	// Initialize all emails with zero matches
+	for _, email := range emails {
+		emailMatches[email] = struct {
+			issueMatches int
+			prMatches    int
+		}{0, 0}
+	}
+
+	// Process search results
+	for _, edge := range query.Search.Edges {
+		node := edge.Node
+
+		var content, itemType string
+		switch node.Typename {
+		case "Issue":
+			content = node.Issue.Title + " " + node.Issue.Body
+			itemType = "issue"
+		case "PullRequest":
+			content = node.PullRequest.Title + " " + node.PullRequest.Body
+			itemType = "pr"
+		}
+
+		// Check which emails appear in this content using exact boundary matching
+		for _, email := range emails {
+			if containsEmail(content, email) {
+				matches := emailMatches[email]
+				if itemType == "issue" {
+					matches.issueMatches++
+				} else {
+					matches.prMatches++
+				}
+				emailMatches[email] = matches
+			}
+		}
+	}
+
+	// Convert results to Address objects
+	for email, matches := range emailMatches {
+		totalMatches := matches.issueMatches + matches.prMatches
+		if totalMatches > 0 {
+			// Calculate confidence similar to individual search
+			baseConfidence := 75
+			if matches.issueMatches > 0 && matches.prMatches > 0 {
+				baseConfidence += 15
+			} else if matches.issueMatches > 0 {
+				baseConfidence += 10
+			} else {
+				baseConfidence += 5
+			}
+
+			if totalMatches >= 3 {
+				baseConfidence += 10
+			} else if totalMatches == 2 {
+				baseConfidence += 5
+			}
+
+			if baseConfidence > 95 {
+				baseConfidence = 95
+			}
+
+			results[email] = Address{
+				Email:      email,
+				Confidence: baseConfidence,
+				Sources: map[string]string{
+					"batched_github_search": fmt.Sprintf("issues:%d, prs:%d", matches.issueMatches, matches.prMatches),
+				},
+			}
+
+			lu.logger.Debug("batched GraphQL validation", "email", email, "confidence", baseConfidence,
+				"issue_matches", matches.issueMatches, "pr_matches", matches.prMatches)
+		}
+	}
+
+	return results
 }
 
 // searchRecentCommitsForEmail searches for an email address in the recent commits we already fetched.
@@ -1658,7 +2078,7 @@ func (lu *Lookup) searchDomainContent(ctx context.Context, client *githubv4.Clie
 		"lastName", lastName,
 		"query", searchQuery)
 
-	err := client.Query(ctx, &query, variables)
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
 	if err != nil {
 		lu.logger.Debug("failed to search user authored content", "error", err, "username", username)
 		return foundEmails
@@ -1721,7 +2141,7 @@ func (lu *Lookup) searchUserComments(ctx context.Context, client *githubv4.Clien
 		"targetDomain", targetDomain,
 		"query", searchQuery)
 
-	err := client.Query(ctx, &commentsQuery, variables)
+	err := lu.doGraphQLQueryWithRetry(ctx, client, &commentsQuery, variables)
 	if err != nil {
 		lu.logger.Debug("failed to search user comments", "error", err, "username", username)
 		return foundEmails
@@ -2264,4 +2684,118 @@ func isEmailChar(c rune) bool {
 	}
 
 	return false
+}
+
+// containsEmail checks if the content contains the exact email address with proper boundaries.
+// This prevents false positives like matching "lewandowski@google.com" when content has "klewandowski@google.com".
+func containsEmail(content, email string) bool {
+	contentLower := strings.ToLower(content)
+	emailLower := strings.ToLower(email)
+
+	// Find all occurrences of the email
+	index := 0
+	for {
+		pos := strings.Index(contentLower[index:], emailLower)
+		if pos == -1 {
+			break
+		}
+
+		absolutePos := index + pos
+
+		// Check if this is a word boundary match
+		// Email should be preceded and followed by non-email characters (or start/end of string)
+		validStart := absolutePos == 0 || !isEmailChar(rune(contentLower[absolutePos-1]))
+		validEnd := absolutePos+len(emailLower) >= len(contentLower) || !isEmailChar(rune(contentLower[absolutePos+len(emailLower)]))
+
+		if validStart && validEnd {
+			return true
+		}
+
+		index = absolutePos + 1
+	}
+
+	return false
+}
+
+// CombineAndFilterGuessResults combines found addresses and guesses, filters by domain,
+// deduplicates, sorts by confidence, and applies high-confidence filtering.
+// This implements the same logic used by the CLI.
+func CombineAndFilterGuessResults(result *GuessResult, domain string) ([]Address, bool) {
+	// Filter found addresses by domain if specified
+	filteredFoundAddresses := result.FoundAddresses
+	if domain != "" {
+		var filtered []Address
+		for _, addr := range result.FoundAddresses {
+			// Extract domain from email address
+			atIndex := strings.LastIndex(addr.Email, "@")
+			if atIndex != -1 && atIndex < len(addr.Email)-1 {
+				emailDomain := addr.Email[atIndex+1:]
+				if strings.EqualFold(emailDomain, domain) {
+					filtered = append(filtered, addr)
+				}
+			}
+		}
+		filteredFoundAddresses = filtered
+	}
+
+	// Combine all results (guesses + found addresses) into a single list
+	var allResults []Address
+	seen := make(map[string]bool)
+
+	// Add found addresses first (they have priority over guesses)
+	for _, addr := range filteredFoundAddresses {
+		email := strings.ToLower(addr.Email)
+		if !seen[email] {
+			allResults = append(allResults, addr)
+			seen[email] = true
+		}
+	}
+
+	// Add guesses (skip if already seen as found address)
+	for _, guess := range result.Guesses {
+		email := strings.ToLower(guess.Email)
+		if !seen[email] {
+			allResults = append(allResults, guess)
+			seen[email] = true
+		}
+	}
+
+	if len(allResults) == 0 {
+		return nil, false
+	}
+
+	// Sort by confidence (highest first)
+	sort.Slice(allResults, func(i, j int) bool {
+		return allResults[i].Confidence > allResults[j].Confidence
+	})
+
+	// Filter results to show only high-confidence ones if any exist above 60%
+	return FilterHighConfidenceAddresses(allResults)
+}
+
+// FilterHighConfidenceAddresses filters results to show only high-confidence ones (>60%)
+// if any exist, otherwise returns all results and a flag indicating if filtering occurred.
+func FilterHighConfidenceAddresses(addresses []Address) ([]Address, bool) {
+	// Check if any addresses have confidence > 60%
+	hasHighConfidence := false
+	for _, addr := range addresses {
+		if addr.Confidence > 60 {
+			hasHighConfidence = true
+			break
+		}
+	}
+
+	// If we have high-confidence results, filter to show only those
+	if hasHighConfidence {
+		var filtered []Address
+		for _, addr := range addresses {
+			if addr.Confidence > 60 {
+				filtered = append(filtered, addr)
+			}
+		}
+		return filtered, false // false = no warning needed, showing high confidence results
+	}
+
+	// Otherwise, return all results with warning flag
+	return addresses, len(addresses) > 0 // true = show warning if we have results but none are high confidence
 }
