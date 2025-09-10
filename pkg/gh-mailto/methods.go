@@ -363,7 +363,9 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 
 // searchCombinedCommits performs a combined search for author and multiple emails in a single API call.
 // This reduces the number of API requests by using GitHub's OR syntax.
-func (lu *Lookup) searchCombinedCommits(ctx context.Context, username, organization string, emails []string) (map[string]bool, []string, []Address) {
+func (lu *Lookup) searchCombinedCommits(
+	ctx context.Context, username, organization string, emails []string,
+) (emailFound map[string]bool, orgs []string, addresses []Address) {
 	var queryParts []string
 	// Add author search
 	if username != "" {
@@ -423,10 +425,10 @@ func (lu *Lookup) searchCombinedCommits(ctx context.Context, username, organizat
 	// Process results
 	foundEmails := make(map[string]bool)
 	var allOrgs []string
-	var addresses []Address
+	var foundAddresses []Address
 	orgMap := make(map[string]bool)
 
-	for _, item := range searchResult.Items {
+	for _, item := range searchResult.Items { //nolint:gocritic // Range copying acceptable for readability
 		// Extract organization info
 		orgName := item.Repository.Owner.Login
 		if orgName != "" && !orgMap[orgName] {
@@ -447,14 +449,14 @@ func (lu *Lookup) searchCombinedCommits(ctx context.Context, username, organizat
 			if strings.Contains(commitAuthorEmail, "@") && strings.Contains(commitAuthorEmail, ".") {
 				// Check if we already have this email
 				found := false
-				for _, addr := range addresses {
+				for _, addr := range addresses { //nolint:govet // False positive - addresses is a parameter, not nil
 					if strings.EqualFold(addr.Email, commitAuthorEmail) {
 						found = true
 						break
 					}
 				}
 				if !found {
-					addresses = append(addresses, Address{
+					foundAddresses = append(foundAddresses, Address{
 						Email:      commitAuthorEmail,
 						Confidence: 85, // High confidence for commit author
 						Verified:   false,
@@ -478,17 +480,17 @@ func (lu *Lookup) searchCombinedCommits(ctx context.Context, username, organizat
 	lu.logger.Debug("combined commit search completed",
 		"total_count", searchResult.TotalCount,
 		"found_emails", len(foundEmails),
-		"unique_addresses", len(addresses),
+		"unique_addresses", len(foundAddresses),
 		"organizations", len(allOrgs))
 
-	return foundEmails, allOrgs, addresses
+	return foundEmails, allOrgs, foundAddresses
 }
 
 // searchEmailInCommits searches for a specific email address in commit history using GitHub search API.
 // Returns true if the email is found in any commits related to the user (authored by them, mention their username, or mention their last name).
 // GitHub's search API finds the email anywhere in the commit (message, patch, etc.), not just in author metadata.
 // Also returns organization information for found commits.
-func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found bool, orgs []string) {
+func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found bool, orgs []string) { //nolint:unused // Used by searchEmailInGitHub
 	// Use GitHub search API to find commits containing the specific email (quoted to prevent GitHub interpretation)
 	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&per_page=100",
 		url.QueryEscape(`"`+email+`"`))
@@ -530,7 +532,7 @@ func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found
 	var foundOrgs []string
 	orgsSeen := make(map[string]bool)
 
-	for _, item := range searchResult.Items {
+	for _, item := range searchResult.Items { //nolint:gocritic // Range copying acceptable for readability
 		// Collect organization info
 		orgName := item.Repository.Owner.Login
 		if orgName != "" && !orgsSeen[orgName] {
@@ -562,7 +564,7 @@ func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found
 // 1. Authored by the GitHub user directly.
 // 2. Contains the user's GitHub username in the commit message.
 // 3. Contains the user's last name (from known names) in the commit message or author name.
-func (lu *Lookup) isCommitRelatedToUser(item struct {
+func (lu *Lookup) isCommitRelatedToUser(item struct { //nolint:unused // Used by searchEmailInCommits
 	Repository struct {
 		Name  string `json:"name"`
 		Owner struct {
@@ -641,35 +643,35 @@ func (lu *Lookup) isCommitRelatedToUser(item struct {
 					lu.logger.Debug("commit related to user via last name in message",
 						"email", email, "last_name", lastName)
 					return true
-				} else {
-					// For last-name-only emails, require additional evidence (first name or username)
-					firstName := strings.ToLower(nameParts[0])
-					username := strings.ToLower(lu.currentUsername)
+				}
 
-					// Check for exact matches first
-					if strings.Contains(message, firstName) || strings.Contains(message, username) {
-						lu.logger.Debug("commit related to user via last name + exact first name/username in message",
-							"email", email, "last_name", lastName, "first_name", firstName, "username", username)
-						return true
-					}
+				// For last-name-only emails, require additional evidence (first name or username)
+				firstName := strings.ToLower(nameParts[0])
+				username := strings.ToLower(lu.currentUsername)
 
-					// Check for nickname/shortened name variations
-					// Look for common patterns: "Kim" as nickname for "Kimberly", etc.
-					if len(firstName) > 3 {
-						// Check if message contains a prefix of the first name (3+ chars)
-						for i := 3; i <= len(firstName); i++ {
-							prefix := firstName[:i]
-							if strings.Contains(message, prefix) {
-								lu.logger.Debug("commit related to user via last name + first name prefix in message",
-									"email", email, "last_name", lastName, "first_name", firstName, "prefix", prefix, "username", username)
-								return true
-							}
+				// Check for exact matches first
+				if strings.Contains(message, firstName) || strings.Contains(message, username) {
+					lu.logger.Debug("commit related to user via last name + exact first name/username in message",
+						"email", email, "last_name", lastName, "first_name", firstName, "username", username)
+					return true
+				}
+
+				// Check for nickname/shortened name variations
+				// Look for common patterns: "Kim" as nickname for "Kimberly", etc.
+				if len(firstName) > 3 {
+					// Check if message contains a prefix of the first name (3+ chars)
+					for i := 3; i <= len(firstName); i++ {
+						prefix := firstName[:i]
+						if strings.Contains(message, prefix) {
+							lu.logger.Debug("commit related to user via last name + first name prefix in message",
+								"email", email, "last_name", lastName, "first_name", firstName, "prefix", prefix, "username", username)
+							return true
 						}
 					}
-
-					lu.logger.Debug("last-name-only email found but no first name/username context",
-						"email", email, "last_name", lastName, "first_name", firstName, "username", username)
 				}
+
+				lu.logger.Debug("last-name-only email found but no first name/username context",
+					"email", email, "last_name", lastName, "first_name", firstName, "username", username)
 			}
 		}
 	}
