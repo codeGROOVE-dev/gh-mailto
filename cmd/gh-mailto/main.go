@@ -41,18 +41,6 @@ const (
 	// Background colors.
 )
 
-// Unicode symbols for modern output.
-const (
-	symbolVerified   = "🔒"
-	symbolUnverified = "📧"
-	symbolGuess      = "🔍"
-	symbolFound      = "✨"
-	symbolArrow      = "→"
-	symbolBullet     = "•"
-	symbolCheck      = "✓"
-	symbolCross      = "✗"
-)
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -201,81 +189,6 @@ func printResults(result *ghmailto.Result, username, org string) {
 			colorDim, sourceText, colorReset)
 	}
 	fmt.Println()
-}
-
-// getConfidenceBar creates a visual confidence bar.
-func getConfidenceBar(confidence int) string {
-	var color string
-	switch {
-	case confidence >= 95:
-		color = colorBrightGreen
-	case confidence >= 80:
-		color = colorBrightYellow
-	case confidence >= 60:
-		color = colorYellow
-	default:
-		color = colorRed
-	}
-
-	return fmt.Sprintf("%s%s", color, colorReset)
-}
-
-// formatAddressSourcesModern formats sources with modern styling.
-func formatAddressSourcesModern(addr ghmailto.Address) string {
-	if len(addr.Sources) == 0 && len(addr.Methods) == 0 {
-		return ""
-	}
-
-	if len(addr.Sources) > 0 {
-		var sources []string
-		for _, method := range addr.Methods {
-			if rawEmail, exists := addr.Sources[method]; exists {
-				methodName := formatMethodModern(method)
-
-				// Check if we have organization info for commit-related methods
-				var orgInfo string
-				if strings.Contains(strings.ToLower(method), "commit") {
-					if orgs, hasOrgs := addr.Sources["found_in_orgs"]; hasOrgs && orgs != "" {
-						orgInfo = fmt.Sprintf(" in %s", orgs)
-					}
-				}
-
-				if rawEmail != addr.Email {
-					sources = append(sources, fmt.Sprintf("%s%s%s%s %s%s%s",
-						colorBrightCyan, methodName, orgInfo, colorReset,
-						colorDim, rawEmail, colorReset))
-				} else {
-					sources = append(sources, fmt.Sprintf("%s%s%s%s",
-						colorBrightCyan, methodName, orgInfo, colorReset))
-				}
-			}
-		}
-		if len(sources) > 0 {
-			return fmt.Sprintf("%s via %s", symbolArrow, strings.Join(sources, ", "))
-		}
-	}
-
-	// Fallback to methods only
-	if len(addr.Methods) > 0 {
-		var methods []string
-		for _, method := range addr.Methods {
-			methodName := formatMethodModern(method)
-
-			// Check if we have organization info for commit-related methods
-			var orgInfo string
-			if strings.Contains(strings.ToLower(method), "commit") {
-				if orgs, hasOrgs := addr.Sources["found_in_orgs"]; hasOrgs && orgs != "" {
-					orgInfo = fmt.Sprintf(" in %s", orgs)
-				}
-			}
-
-			methods = append(methods, fmt.Sprintf("%s%s%s%s",
-				colorBrightCyan, methodName, orgInfo, colorReset))
-		}
-		return fmt.Sprintf("%s via %s", symbolArrow, strings.Join(methods, ", "))
-	}
-
-	return ""
 }
 
 // formatMethodModern converts method names to modern display format.

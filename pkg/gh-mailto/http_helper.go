@@ -69,9 +69,9 @@ func (lu *Lookup) doRequestWithAccept(ctx context.Context, method, url string, b
 	return finalResp, nil
 }
 
-// doJSONRequestWithAccept performs an HTTP request with custom Accept header and decodes the JSON response.
-func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url string, body io.Reader, result any, accept string) error {
-	resp, err := lu.doRequestWithAccept(ctx, method, url, body, accept)
+// doJSONRequestWithAccept performs a GET request with custom Accept header and decodes the JSON response.
+func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, url string, body io.Reader, result any, accept string) error {
+	resp, err := lu.doRequestWithAccept(ctx, "GET", url, body, accept)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url strin
 
 	// Log response metadata only - never log response body for security
 	lu.logger.Debug("API response received",
-		"method", method,
+		"method", "GET",
 		"url", url,
 		"status", resp.StatusCode,
 		"content_length", len(bodyBytes),
@@ -118,8 +118,8 @@ func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, method, url strin
 
 // doGraphQLQueryWithRetry performs a GraphQL query with retry logic for reliability.
 func (lu *Lookup) doGraphQLQueryWithRetry(ctx context.Context, client interface {
-	Query(ctx context.Context, q interface{}, variables map[string]interface{}) error
-}, query interface{}, variables map[string]interface{},
+	Query(ctx context.Context, q any, variables map[string]any) error
+}, query any, variables map[string]any,
 ) error {
 	return retry.Do(
 		func() error {

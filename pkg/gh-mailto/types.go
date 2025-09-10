@@ -1047,7 +1047,10 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 			emailFoundInCommits[email] = found
 		}
 	}
-	lu.logger.Debug("batched commit search completed", "found_emails", len(emailFoundInCommits), "total_searched", len(emails), "chunks", (len(emails)+chunkSize-1)/chunkSize)
+	lu.logger.Debug("batched commit search completed",
+		"found_emails", len(emailFoundInCommits),
+		"total_searched", len(emails),
+		"chunks", (len(emails)+chunkSize-1)/chunkSize)
 
 	// Batch GraphQL searches for issues/PRs - combine all emails into single queries
 	// GraphQL also has OR operator limits, so chunk the GraphQL searches too
@@ -1108,12 +1111,12 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 
 	// Otherwise, return all guesses (validated + unvalidated with scaled confidence)
 	scaledUnvalidatedGuesses := lu.scaleUnvalidatedConfidence(unvalidatedGuesses)
-	allGuesses := append(validatedGuesses, scaledUnvalidatedGuesses...)
+	validatedGuesses = append(validatedGuesses, scaledUnvalidatedGuesses...)
 	lu.logger.Debug("showing all results (no high-confidence found)",
-		"validated", len(validatedGuesses),
+		"validated", len(validatedGuesses)-len(scaledUnvalidatedGuesses),
 		"unvalidated", len(scaledUnvalidatedGuesses),
-		"total", len(allGuesses))
-	return allGuesses
+		"total", len(validatedGuesses))
+	return validatedGuesses
 }
 
 // scaleUnvalidatedConfidence assigns realistic probability scores to unvalidated guesses
@@ -1582,7 +1585,19 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 
 	if totalMatches > 0 {
 		// Calculate confidence based on validation methods using standardized values
-		newConfidence := calculateValidationConfidence(validatedIssueMatches, validatedPRMatches, commitMatches)
+		newConfidence := 0
+		if validatedIssueMatches > 0 {
+			newConfidence += ConfidenceIssues
+		}
+		if validatedPRMatches > 0 {
+			newConfidence += ConfidencePRs
+		}
+		if commitMatches > 0 {
+			newConfidence += ConfidenceCommits
+		}
+		if newConfidence > 100 {
+			newConfidence = 100
+		}
 
 		validatedGuess.Confidence = newConfidence
 
@@ -1675,7 +1690,10 @@ func (lu *Lookup) batchedGraphQLSearch(ctx context.Context, emails []string) map
 		}
 	}
 
-	lu.logger.Debug("batched GraphQL search completed", "total_emails", len(emails), "found_emails", len(results), "chunks", (len(emails)+chunkSize-1)/chunkSize)
+	lu.logger.Debug("batched GraphQL search completed",
+		"total_emails", len(emails),
+		"found_emails", len(results),
+		"chunks", (len(emails)+chunkSize-1)/chunkSize)
 	return results
 }
 
@@ -2090,7 +2108,7 @@ func (lu *Lookup) searchDomainContent(ctx context.Context, client *githubv4.Clie
 }
 
 // searchUserComments searches for domain emails in comments authored by the user.
-func (lu *Lookup) searchUserComments(ctx context.Context, client *githubv4.Client, username string, targetDomain string, _ string, lastName string, emailGuesses []string) []Address {
+func (lu *Lookup) searchUserComments(ctx context.Context, client *githubv4.Client, username string, targetDomain string, _ string, _ string, emailGuesses []string) []Address {
 	var foundEmails []Address
 
 	// Search for issues that have comments by the user containing the target domain
@@ -2597,76 +2615,57 @@ func parseUsernameForNames(username, targetDomain string, knownNames ...string) 
 
 	// Try to find first name at the beginning of username
 	for _, firstName := range commonFirstNames {
-		if strings.HasPrefix(usernameLower, firstName) && len(usernameLower) > len(firstName) {
-			// Extract potential last name
-			lastName := usernameLower[len(firstName):]
-
-			// Skip if lastname is too short or invalid
-			if len(lastName) < 3 || !isValidEmailPrefix(lastName) {
-				continue
-			}
-
-			// Generate firstname.lastname guess
-			email := firstName + "." + lastName + "@" + targetDomain
-			guesses = append(guesses, Address{
-				Email:      email,
-				Confidence: 35,
-				Pattern:    "parsed_username",
-				Sources:    map[string]string{"source_username": username, "parsed_first": firstName, "parsed_last": lastName},
-			})
-
-			return guesses // Return immediately on first match
+		if !strings.HasPrefix(usernameLower, firstName) || len(usernameLower) <= len(firstName) {
+			continue
 		}
+
+		// Extract potential last name
+		lastName := usernameLower[len(firstName):]
+
+		// Skip if lastname is too short or invalid
+		if len(lastName) < 3 || !isValidEmailPrefix(lastName) {
+			continue
+		}
+
+		// Generate firstname.lastname guess
+		email := firstName + "." + lastName + "@" + targetDomain
+		guesses = append(guesses, Address{
+			Email:      email,
+			Confidence: 35,
+			Pattern:    "parsed_username",
+			Sources:    map[string]string{"source_username": username, "parsed_first": firstName, "parsed_last": lastName},
+		})
+
+		return guesses // Return immediately on first match
 	}
 
 	// Try to find first name at the END of username (like "crosleyjack")
 	for _, firstName := range commonFirstNames {
-		if strings.HasSuffix(usernameLower, firstName) && len(usernameLower) > len(firstName) {
-			// Extract potential last name (everything before the first name)
-			lastName := usernameLower[:len(usernameLower)-len(firstName)]
-
-			// Skip if lastname is too short or invalid
-			if len(lastName) < 3 || !isValidEmailPrefix(lastName) {
-				continue
-			}
-
-			// Generate firstname.lastname guess
-			email := firstName + "." + lastName + "@" + targetDomain
-			guesses = append(guesses, Address{
-				Email:      email,
-				Confidence: 35,
-				Pattern:    "parsed_username_suffix",
-				Sources:    map[string]string{"source_username": username, "parsed_first": firstName, "parsed_last": lastName},
-			})
-
-			return guesses // Return immediately on first match
+		if !strings.HasSuffix(usernameLower, firstName) || len(usernameLower) <= len(firstName) {
+			continue
 		}
+
+		// Extract potential last name (everything before the first name)
+		lastName := usernameLower[:len(usernameLower)-len(firstName)]
+
+		// Skip if lastname is too short or invalid
+		if len(lastName) < 3 || !isValidEmailPrefix(lastName) {
+			continue
+		}
+
+		// Generate firstname.lastname guess
+		email := firstName + "." + lastName + "@" + targetDomain
+		guesses = append(guesses, Address{
+			Email:      email,
+			Confidence: 35,
+			Pattern:    "parsed_username_suffix",
+			Sources:    map[string]string{"source_username": username, "parsed_first": firstName, "parsed_last": lastName},
+		})
+
+		return guesses // Return immediately on first match
 	}
 
 	return guesses
-}
-
-// calculateValidationConfidence calculates confidence based on validation methods used.
-func calculateValidationConfidence(issueMatches, prMatches, commitMatches int) int {
-	confidence := 0
-
-	// Add confidence for each validation method found
-	if issueMatches > 0 {
-		confidence += ConfidenceIssues
-	}
-	if prMatches > 0 {
-		confidence += ConfidencePRs
-	}
-	if commitMatches > 0 {
-		confidence += ConfidenceCommits
-	}
-
-	// Cap at 100%
-	if confidence > 100 {
-		confidence = 100
-	}
-
-	return confidence
 }
 
 // isEmailChar returns true if the character is valid in an email address
@@ -2681,9 +2680,9 @@ func isEmailChar(c rune) bool {
 	switch c {
 	case '@', '.', '-', '_', '+', '=', '!', '#', '$', '%', '&', '\'', '*', '/', '?', '^', '`', '{', '|', '}', '~':
 		return true
+	default:
+		return false
 	}
-
-	return false
 }
 
 // containsEmail checks if the content contains the exact email address with proper boundaries.

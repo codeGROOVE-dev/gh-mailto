@@ -32,7 +32,7 @@ func (lu *Lookup) lookupViaPublicAPI(ctx context.Context, username, _ string) ([
 
 	apiURL := fmt.Sprintf("https://api.github.com/users/%s", url.PathEscape(username))
 	lu.logger.Debug("making public API request", "url", apiURL)
-	if err := lu.doJSONRequestWithAccept(ctx, "GET", apiURL, nil, &user, "application/vnd.github.v3+json"); err != nil {
+	if err := lu.doJSONRequestWithAccept(ctx, apiURL, nil, &user, "application/vnd.github.v3+json"); err != nil {
 		lu.logger.Warn("public API request failed", "error", err, "username", username)
 		return nil, fmt.Errorf("fetching user data: %w", err)
 	}
@@ -106,7 +106,7 @@ func (lu *Lookup) lookupViaCommits(ctx context.Context, username, organization s
 	}
 
 	lu.logger.Debug("making commits search request", "url", searchURL)
-	if err := lu.doJSONRequestWithAccept(ctx, "GET", searchURL, http.NoBody, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
+	if err := lu.doJSONRequestWithAccept(ctx, searchURL, http.NoBody, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
 		lu.logger.Warn("commits search failed", "error", err, "username", username, "organization", organization)
 		return nil, fmt.Errorf("searching commits: %w", err)
 	}
@@ -338,7 +338,7 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 		Name  string `json:"name"`
 	}
 
-	if err := lu.doJSONRequestWithAccept(ctx, "GET", membersURL, nil, &members, "application/vnd.github.v3+json"); err != nil {
+	if err := lu.doJSONRequestWithAccept(ctx, membersURL, nil, &members, "application/vnd.github.v3+json"); err != nil {
 		return nil, fmt.Errorf("fetching members: %w", err)
 	}
 
@@ -415,7 +415,7 @@ func (lu *Lookup) searchCombinedCommits(ctx context.Context, username, organizat
 		TotalCount int `json:"total_count"`
 	}
 
-	if err := lu.doJSONRequestWithAccept(ctx, "GET", searchURL, nil, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
+	if err := lu.doJSONRequestWithAccept(ctx, searchURL, nil, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
 		lu.logger.Error("combined commit search failed", "error", err, "query", query)
 		return make(map[string]bool), nil, nil
 	}
@@ -521,7 +521,7 @@ func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found
 
 	lu.logger.Debug("searching for email in commits", "email", email, "url", searchURL)
 
-	if err := lu.doJSONRequestWithAccept(ctx, "GET", searchURL, nil, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
+	if err := lu.doJSONRequestWithAccept(ctx, searchURL, nil, &searchResult, "application/vnd.github.cloak-preview"); err != nil {
 		lu.logger.Debug("commit search failed", "email", email, "error", err)
 		return false, nil
 	}
