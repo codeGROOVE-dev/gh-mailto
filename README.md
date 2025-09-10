@@ -19,6 +19,10 @@ gh auth login  # GitHub CLI authentication required
 
 ## Usage
 
+The easiest way is the web UI: https://mailto.codegroove.dev/
+
+There is also a CLI tool:
+
 Find all email addresses for a user in an organization:
 ```bash
 gh-mailto --user username --org organization
