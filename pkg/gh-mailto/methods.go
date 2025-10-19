@@ -81,12 +81,12 @@ func (lu *Lookup) lookupViaCommits(ctx context.Context, username, organization s
 	var searchURL string
 	if organization != "" {
 		// Use GitHub search commits API to find user's commits in the organization directly
-		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=org:%s+author:%s&sort=committer-date&order=desc&per_page=100",
-			url.QueryEscape(organization), url.QueryEscape(username))
+		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=org:%s+author:%s&sort=committer-date&order=desc&per_page=%d",
+			url.QueryEscape(organization), url.QueryEscape(username), lu.commitsLimit)
 	} else {
 		// Search user's public commits across all repositories
-		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=author:%s&sort=committer-date&order=desc&per_page=100",
-			url.QueryEscape(username))
+		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=author:%s&sort=committer-date&order=desc&per_page=%d",
+			url.QueryEscape(username), lu.commitsLimit)
 	}
 
 	var searchResult struct {
@@ -388,8 +388,8 @@ func (lu *Lookup) searchCombinedCommits(
 	}
 
 	query := strings.Join(queryParts, " OR ")
-	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&sort=committer-date&order=desc&per_page=100",
-		url.QueryEscape(query))
+	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&sort=committer-date&order=desc&per_page=%d",
+		url.QueryEscape(query), lu.commitsLimit)
 
 	lu.logger.Debug("combined commit search", "query", query, "url", searchURL)
 
@@ -492,8 +492,8 @@ func (lu *Lookup) searchCombinedCommits(
 // Also returns organization information for found commits.
 func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found bool, orgs []string) { //nolint:unused // Used by searchEmailInGitHub
 	// Use GitHub search API to find commits containing the specific email (quoted to prevent GitHub interpretation)
-	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&per_page=100",
-		url.QueryEscape(`"`+email+`"`))
+	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&per_page=%d",
+		url.QueryEscape(`"`+email+`"`), lu.commitsLimit)
 
 	var searchResult struct {
 		Items []struct {

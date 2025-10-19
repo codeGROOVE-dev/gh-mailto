@@ -72,6 +72,7 @@ type Lookup struct {
 	recentCommitEmails map[string]bool // Recent commit author/committer emails for validation
 	currentUsername    string          // Current GitHub username being looked up
 	currentUserNames   []string        // Known names for the current user (for validation)
+	commitsLimit       int             // Number of commits to search (default: 100)
 }
 
 // Option configures a Lookup instance.
@@ -81,6 +82,16 @@ type Option func(*Lookup)
 func WithLogger(logger *slog.Logger) Option {
 	return func(lu *Lookup) {
 		lu.logger = logger
+	}
+}
+
+// WithCommitsLimit returns an Option that sets the number of commits to search.
+// Default is 100. Lower values improve performance but may miss older email addresses.
+func WithCommitsLimit(limit int) Option {
+	return func(lu *Lookup) {
+		if limit > 0 && limit <= 100 {
+			lu.commitsLimit = limit
+		}
 	}
 }
 
@@ -176,14 +187,16 @@ func New(token string, opts ...Option) *Lookup {
 		slog.Error("invalid GitHub token provided", "error", err)
 		// Return a non-functional lookup with empty token to prevent crashes
 		return &Lookup{
-			token:  "",
-			logger: slog.Default(),
+			token:        "",
+			logger:       slog.Default(),
+			commitsLimit: 100,
 		}
 	}
 
 	lu := &Lookup{
-		token:  token,
-		logger: slog.Default(),
+		token:        token,
+		logger:       slog.Default(),
+		commitsLimit: 100, // Default to 100 commits
 	}
 	for _, opt := range opts {
 		opt(lu)

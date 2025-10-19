@@ -50,11 +50,12 @@ func main() {
 
 func run() error {
 	var (
-		username = flag.String("user", "", "GitHub username")
-		org      = flag.String("org", "", "GitHub organization")
-		domain   = flag.String("domain", "", "Only include email addresses for this domain (e.g., stromberg.org)")
-		guess    = flag.Bool("guess", false, "Guess email address for the domain specified by --domain (requires --user, --org, and --domain)")
-		verbose  = flag.Bool("verbose", false, "Enable verbose logging to show queries and results from each method")
+		username     = flag.String("user", "", "GitHub username")
+		org          = flag.String("org", "", "GitHub organization")
+		domain       = flag.String("domain", "", "Only include email addresses for this domain (e.g., stromberg.org)")
+		guess        = flag.Bool("guess", false, "Guess email address for the domain specified by --domain (requires --user, --org, and --domain)")
+		verbose      = flag.Bool("verbose", false, "Enable verbose logging to show queries and results from each method")
+		commitsLimit = flag.Int("commits", 100, "Number of commits to search (1-100, default: 100)")
 	)
 	flag.Parse()
 
@@ -83,6 +84,11 @@ func run() error {
 		return errors.New("--guess requires --domain to be specified")
 	}
 
+	// Validate commits limit
+	if *commitsLimit < 1 || *commitsLimit > 100 {
+		return errors.New("--commits must be between 1 and 100")
+	}
+
 	// Set up logger
 	logLevel := slog.LevelWarn
 	if *verbose {
@@ -103,8 +109,11 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Create lookup with hard-coded defaults
-	lookup := ghmailto.New(token, ghmailto.WithLogger(logger))
+	// Create lookup with configured options
+	lookup := ghmailto.New(token,
+		ghmailto.WithLogger(logger),
+		ghmailto.WithCommitsLimit(*commitsLimit),
+	)
 
 	// Handle guess mode
 	if *guess {
