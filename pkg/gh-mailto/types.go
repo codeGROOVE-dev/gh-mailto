@@ -1,3 +1,18 @@
+// Package ghmailto provides email address lookup and guessing for GitHub users.
+//
+// It discovers email addresses through multiple methods including public profiles,
+// git commit history, SAML identity, organization verified domains, and member lists.
+//
+// Example usage:
+//
+//	lookup := ghmailto.New(token)
+//	result, err := lookup.Lookup(ctx, "username", "org")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, addr := range result.Addresses {
+//	    fmt.Printf("%s\n", addr.Email)
+//	}
 package ghmailto
 
 import (
@@ -674,6 +689,33 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 			return // Skip if we already found this email
 		}
 
+		// Apply penalty for special characters in email prefix (unusual in practice)
+		if atIndex := strings.Index(email, "@"); atIndex > 0 {
+			prefix := email[:atIndex]
+			specialCharCount := 0
+			for _, r := range prefix {
+				// Count special characters that are technically valid but rarely used
+				if r == '`' || r == '|' || r == '~' || r == '!' || r == '#' || r == '$' ||
+					r == '%' || r == '^' || r == '&' || r == '*' || r == '=' || r == '+' ||
+					r == '{' || r == '}' || r == '[' || r == ']' || r == '\\' || r == '/' ||
+					r == '<' || r == '>' || r == '?' || r == '\'' || r == '"' {
+					specialCharCount++
+				}
+			}
+			if specialCharCount > 0 {
+				penalty := specialCharCount * 5
+				confidence -= penalty
+				if confidence < 1 {
+					confidence = 1 // Keep minimum score
+				}
+				lu.logger.Debug("applying special character penalty to guess",
+					"email", email,
+					"special_chars", specialCharCount,
+					"penalty", penalty,
+					"adjusted_confidence", confidence)
+			}
+		}
+
 		if existing, exists := guessMap[email]; exists {
 			// Check if this is the same pattern - if so, don't double count
 			if existing.Pattern == pattern {
@@ -1244,6 +1286,34 @@ func (lu *Lookup) scaleUnvalidatedConfidence(unvalidatedGuesses []Address) []Add
 		default:
 			// Fallback for any unexpected values
 			probabilityScore = 10
+		}
+
+		// Apply penalty for special characters in email prefix (unusual in practice)
+		// Extract prefix (part before @)
+		if atIndex := strings.Index(scaledGuesses[i].Email, "@"); atIndex > 0 {
+			prefix := scaledGuesses[i].Email[:atIndex]
+			specialCharCount := 0
+			for _, r := range prefix {
+				// Count special characters that are technically valid but rarely used
+				if r == '`' || r == '|' || r == '~' || r == '!' || r == '#' || r == '$' ||
+					r == '%' || r == '^' || r == '&' || r == '*' || r == '=' || r == '+' ||
+					r == '{' || r == '}' || r == '[' || r == ']' || r == '\\' || r == '/' ||
+					r == '<' || r == '>' || r == '?' || r == '\'' || r == '"' {
+					specialCharCount++
+				}
+			}
+			if specialCharCount > 0 {
+				penalty := specialCharCount * 5
+				probabilityScore -= penalty
+				if probabilityScore < 1 {
+					probabilityScore = 1 // Keep minimum score
+				}
+				lu.logger.Debug("applying special character penalty",
+					"email", scaledGuesses[i].Email,
+					"special_chars", specialCharCount,
+					"penalty", penalty,
+					"adjusted_score", probabilityScore)
+			}
 		}
 
 		lu.logger.Debug("assigning probability score to unvalidated guess",
