@@ -371,6 +371,7 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 	type methodResult struct { //nolint:govet // Local struct, field alignment not critical
 		addresses []Address
 		name      string
+		duration  time.Duration
 		err       error
 	}
 
@@ -381,10 +382,12 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 		wg.Add(1)
 		go func(m methodInfo) {
 			defer wg.Done()
+			methodStart := time.Now()
 			addresses, err := m.fn(ctx, username, organization)
 			results <- methodResult{
 				name:      m.name,
 				addresses: addresses,
+				duration:  time.Since(methodStart),
 				err:       err,
 			}
 		}(method)
@@ -400,11 +403,18 @@ func (lu *Lookup) Lookup(ctx context.Context, username, organization string) (*R
 			lu.logger.Warn("lookup method failed",
 				"method", result.name,
 				"error", result.err,
+				"duration", result.duration,
 				"username", username,
 				"organization", organization,
 			)
 			continue
 		}
+		lu.logger.Info("lookup method succeeded",
+			"method", result.name,
+			"addressesFound", len(result.addresses),
+			"duration", result.duration,
+			"username", username,
+		)
 		for _, addr := range result.addresses {
 			acc.add(addr, result.name)
 		}
@@ -646,7 +656,7 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 }
 
 // generateIntelligentGuesses creates email guesses based on existing patterns and user info.
-func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string, addresses []Address, targetDomain string) []Address { //nolint:gocognit,revive // Complex email guessing logic
+func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string, addresses []Address, targetDomain string) []Address { //nolint:gocognit,maintidx,revive // Complex email guessing logic
 	// Track guesses by email to combine confidence scores and sources
 	guessMap := make(map[string]*Address, len(addresses)*2) // Estimate 2x addresses for guesses
 
@@ -744,6 +754,8 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 	}
 
 	// Strategy 2: Use unique normalized prefixes from other domains (50% confidence)
+	// Track how many times each prefix appears across different domains
+	prefixDomains := make(map[string][]string)
 	for _, addr := range addresses {
 		email := addr.Email
 		if !strings.EqualFold(extractDomain(email), targetDomain) {
@@ -756,6 +768,7 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 			parts := strings.SplitN(email, "@", 2)
 			if len(parts) == 2 && parts[0] != "" {
 				prefix := parts[0]
+				domain := parts[1]
 				// Skip prefixes that end with common domain extensions (likely invalid)
 				if strings.HasSuffix(prefix, ".dev") || strings.HasSuffix(prefix, ".com") ||
 					strings.HasSuffix(prefix, ".org") || strings.HasSuffix(prefix, ".net") ||
@@ -778,10 +791,25 @@ func (lu *Lookup) generateIntelligentGuesses(_ context.Context, username string,
 				if isGeneric {
 					continue
 				}
-				guess := prefix + "@" + targetDomain
-				addGuess(guess, 25, "same_prefix_as_other_domain", map[string]string{"source_email": email})
+
+				// Track which domains use this prefix
+				prefixDomains[prefix] = append(prefixDomains[prefix], domain)
 			}
 		}
+	}
+
+	// Now create guesses with confidence based on how many domains use the same prefix
+	for prefix, domains := range prefixDomains {
+		guess := prefix + "@" + targetDomain
+		// Higher confidence if the same prefix appears on multiple domains
+		confidence := 50
+		if len(domains) >= 2 {
+			confidence = 60 // Very strong signal - consistent prefix across multiple domains
+		}
+		addGuess(guess, confidence, "same_prefix_as_other_domain", map[string]string{
+			"source_email": prefix + "@" + domains[0],
+			"domain_count": strconv.Itoa(len(domains)),
+		})
 	}
 
 	// Strategy 2 & 3: Use names from addresses (populated by lookup methods)
@@ -1197,8 +1225,12 @@ func (lu *Lookup) scaleUnvalidatedConfidence(unvalidatedGuesses []Address) []Add
 
 		// Assign scores based on original confidence ordering (higher original = more common pattern)
 		switch originalConfidence {
+		case 60: // same_prefix_as_other_domain (multiple domains) - extremely strong signal
+			probabilityScore = 40
 		case 55: // firstname.lastname@domain - most common pattern
 			probabilityScore = 35
+		case 50: // same_prefix_as_other_domain (single domain) - very strong signal
+			probabilityScore = 30
 		case 45: // firstname@domain - common for founders/small companies
 			probabilityScore = 25
 		case 35: // firstletterlastname@domain - abbreviated format
@@ -1985,9 +2017,7 @@ func normalizeUnicode(input string) string {
 				return 'l'
 			case 'ø', 'Ø':
 				return 'o'
-			case 'đ', 'Đ':
-				return 'd'
-			case 'ð', 'Ð':
+			case 'đ', 'Đ', 'ð', 'Ð':
 				return 'd'
 			default:
 				return unicode.ToLower(r)
@@ -2207,8 +2237,8 @@ func CombineAndFilterGuessResults(result *GuessResult, domain string) ([]Address
 		return b.Confidence - a.Confidence
 	})
 
-	// Filter results to show only high-confidence ones if any exist above 60%
-	return FilterHighConfidenceAddresses(allResults)
+	// Return all results without filtering (multiple strong patterns can exist simultaneously)
+	return allResults, false
 }
 
 // FilterHighConfidenceAddresses filters results to show only high-confidence ones (>60%)

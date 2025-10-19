@@ -171,14 +171,9 @@ func printResults(result *ghmailto.Result, username, org string) {
 		return
 	}
 
-	// Filter results to show only high-confidence ones if any exist above 60%
-	addressesToShow, showLowConfidenceWarning := ghmailto.FilterHighConfidenceAddresses(result.Addresses)
-
-	// Show warning if we're displaying low-confidence results
-	if showLowConfidenceWarning {
-		fmt.Printf("%s⚠️  No high confidence addresses found, showing all possibilities:%s\n\n",
-			colorYellow, colorReset)
-	}
+	// Show all addresses without filtering
+	// (Filtering can hide valid results when multiple strong patterns exist)
+	addressesToShow := result.Addresses
 
 	// Display addresses with clean Unix-style formatting
 	for _, addr := range addressesToShow {

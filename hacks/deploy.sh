@@ -1,4 +1,4 @@
-#!/bin/sh -x
+#!/bin/bash -x
 # Deploy the current Go app to Google Cloud run
 set -eux -o pipefail
 
@@ -6,7 +6,7 @@ PROJECT=${GCP_PROJECT:=ready-to-review}
 REGISTRY="${PROJECT}"
 REGION="us-central1"
 
-APP_NAME=$(basename $(go mod graph | head -n 1 | cut -d" " -f1))
+APP_NAME=$(basename "$(go mod graph | head -n 1 | cut -d" " -f1)")
 APP_USER="${APP_NAME}@${PROJECT}.iam.gserviceaccount.com"
 APP_IMAGE="gcr.io/${REGISTRY}/${APP_NAME}"
 

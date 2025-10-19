@@ -20,8 +20,28 @@ endif
 LINTERS :=
 FIXERS :=
 
+SHELLCHECK_VERSION ?= v0.10.0
+SHELLCHECK_BIN := $(LINT_ROOT)/out/linters/shellcheck-$(SHELLCHECK_VERSION)-$(LINT_ARCH)
+$(SHELLCHECK_BIN):
+	mkdir -p $(LINT_ROOT)/out/linters
+	curl -sSfL -o $@.tar.xz https://github.com/koalaman/shellcheck/releases/download/$(SHELLCHECK_VERSION)/shellcheck-$(SHELLCHECK_VERSION).$(LINT_OS_LOWER).$(LINT_ARCH).tar.xz \
+		|| echo "Unable to fetch shellcheck for $(LINT_OS)/$(LINT_ARCH): falling back to locally install"
+	test -f $@.tar.xz \
+		&& tar -C $(LINT_ROOT)/out/linters -xJf $@.tar.xz \
+		&& mv $(LINT_ROOT)/out/linters/shellcheck-$(SHELLCHECK_VERSION)/shellcheck $@ \
+		|| printf "#!/usr/bin/env shellcheck\n" > $@
+	chmod u+x $@
+
+LINTERS += shellcheck-lint
+shellcheck-lint: $(SHELLCHECK_BIN)
+	$(SHELLCHECK_BIN) $(shell find . -name "*.sh")
+
+FIXERS += shellcheck-fix
+shellcheck-fix: $(SHELLCHECK_BIN)
+	$(SHELLCHECK_BIN) $(shell find . -name "*.sh") -f diff | { read -t 1 line || exit 0; { echo "$$line" && cat; } | git apply -p2; }
+
 GOLANGCI_LINT_CONFIG := $(LINT_ROOT)/.golangci.yml
-GOLANGCI_LINT_VERSION ?= v2.4.0
+GOLANGCI_LINT_VERSION ?= v2.5.0
 GOLANGCI_LINT_BIN := $(LINT_ROOT)/out/linters/golangci-lint-$(GOLANGCI_LINT_VERSION)-$(LINT_ARCH)
 $(GOLANGCI_LINT_BIN):
 	mkdir -p $(LINT_ROOT)/out/linters
@@ -50,10 +70,46 @@ LINTERS += yamllint-lint
 yamllint-lint: $(YAMLLINT_BIN)
 	PYTHONPATH=$(YAMLLINT_ROOT)/dist $(YAMLLINT_ROOT)/dist/bin/yamllint .
 
+BIOME_VERSION ?= 2.2.6
+BIOME_BIN := $(LINT_ROOT)/out/linters/biome-$(BIOME_VERSION)-$(LINT_ARCH)
+BIOME_CONFIG := $(LINT_ROOT)/biome.json
+
+# Map architecture names for Biome downloads
+BIOME_ARCH := $(LINT_ARCH)
+ifeq ($(LINT_ARCH),x86_64)
+	BIOME_ARCH := x64
+endif
+
+$(BIOME_BIN):
+	mkdir -p $(LINT_ROOT)/out/linters
+	rm -rf $(LINT_ROOT)/out/linters/biome-*
+	curl -sSfL -o $@ https://github.com/biomejs/biome/releases/download/%40biomejs%2Fbiome%40$(BIOME_VERSION)/biome-$(LINT_OS_LOWER)-$(BIOME_ARCH) \
+		|| echo "Unable to fetch biome for $(LINT_OS_LOWER)/$(BIOME_ARCH), falling back to local install"
+	test -f $@ || printf "#!/usr/bin/env biome\n" > $@
+	chmod u+x $@
+
+LINTERS += biome-lint
+biome-lint: $(BIOME_BIN)
+	$(BIOME_BIN) check --config-path=$(BIOME_CONFIG) .
+
+FIXERS += biome-fix
+biome-fix: $(BIOME_BIN)
+	$(BIOME_BIN) check --write --config-path=$(BIOME_CONFIG) .
+
 .PHONY: _lint $(LINTERS)
-_lint: $(LINTERS)
+_lint:
+	@exit_code=0; \
+	for target in $(LINTERS); do \
+		$(MAKE) $$target || exit_code=1; \
+	done; \
+	exit $$exit_code
 
 .PHONY: fix $(FIXERS)
-fix: $(FIXERS)
+fix:
+	@exit_code=0; \
+	for target in $(FIXERS); do \
+		$(MAKE) $$target || exit_code=1; \
+	done; \
+	exit $$exit_code
 
 # END: lint-install .

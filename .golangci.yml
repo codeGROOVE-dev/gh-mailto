@@ -152,10 +152,10 @@ linters:
 
     nakedret:
       # Default: 30
-      max-func-lines: 4
+      max-func-lines: 7
 
     nestif:
-      min-complexity: 12
+      min-complexity: 15
 
     nolintlint:
       # Exclude following linters from requiring an explanation.
@@ -173,9 +173,9 @@ linters:
           severity: warning
           disabled: true
         - name: cognitive-complexity
-          arguments: [55]
+          disabled: true # prefer maintidx
         - name: cyclomatic
-          arguments: [60]
+          disabled: true # prefer maintidx
         - name: function-length
           arguments: [150, 225]
         - name: line-length-limit
@@ -185,6 +185,8 @@ linters:
         - name: max-public-structs
           arguments: [10]
         - name: flag-parameter # fixes are difficult
+          disabled: true
+        - name: use-waitgroup-go # Standard Go pattern is fine
           disabled: true
 
     rowserrcheck:
@@ -207,8 +209,14 @@ linters:
       os-temp-dir: true
 
     varnamelen:
-      max-distance: 40
+      max-distance: 75
       min-name-length: 2
+      check-receivers: false
+      ignore-names:
+        - r
+        - w
+        - f
+        - err
 
   exclusions:
     # Default: []

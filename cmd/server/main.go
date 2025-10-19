@@ -177,14 +177,12 @@ func main() {
 				return "First.Last"
 			case "first":
 				return "FirstName"
-			case "flast":
+			case "flast", "firstlast":
 				return "FirstnameLastname"
 			case "last":
 				return "LastName"
 			case "initials":
 				return "F.L."
-			case "firstlast":
-				return "FirstnameLastname"
 			case "github_username_exact":
 				return "GitHub Username"
 			case "github_username_prefix":
@@ -197,9 +195,7 @@ func main() {
 				return "Parsed Username"
 			case "profile_parsed_username":
 				return "Profile-Based Parse"
-			case "git_commits":
-				return "Discovery (actual email found)"
-			case "git_commits_multi_method":
+			case "git_commits", "git_commits_multi_method":
 				return "Discovery (actual email found)"
 			default:
 				return pattern
