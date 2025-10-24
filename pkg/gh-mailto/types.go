@@ -660,7 +660,8 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 	}
 
 	// Apply precedence rules to find addresses in the target domain
-	targetDomain := strings.ToLower(opts.Domain)
+	// Preserve original case - GitHub's commit search is case-sensitive
+	targetDomain := opts.Domain
 
 	// Always generate intelligent guesses using original addresses
 	// (not normalized, so we can properly identify and skip GitHub noreply addresses)
@@ -679,6 +680,17 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 		"guesses", len(guessResult.Guesses),
 		"duration", duration,
 	)
+
+	// Log each final guess for debugging
+	for i, guess := range guessResult.Guesses {
+		lu.logger.Info("final guess",
+			"rank", i+1,
+			"email", guess.Email,
+			"confidence", guess.Confidence,
+			"pattern", guess.Pattern,
+			"verified", guess.Verified,
+		)
+	}
 
 	return guessResult, nil
 }
@@ -1176,6 +1188,7 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 	// GitHub limits OR operators to 5, so we need to chunk the emails
 	// We can batch 4 emails per request (5 OR operators = author + 4 emails)
 	emailFoundInCommits := make(map[string]bool)
+	commitSearchFailed := false
 	chunkSize := 4
 	for i := 0; i < len(emails); i += chunkSize {
 		end := i + chunkSize
@@ -1184,11 +1197,19 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 		}
 		chunk := emails[i:end]
 
+		// Note: searchCombinedCommits logs errors internally and returns empty results on failure
+		// We continue processing to provide degraded service rather than failing completely
 		chunkResults, _, _ := lu.searchCombinedCommits(ctx, lu.currentUsername, "", chunk)
+		if len(chunkResults) == 0 && len(chunk) > 0 {
+			commitSearchFailed = true
+		}
 		// Merge results
 		for email, found := range chunkResults {
 			emailFoundInCommits[email] = found
 		}
+	}
+	if commitSearchFailed {
+		lu.logger.Warn("commit search returned no results - validation may be incomplete, but guesses will still be returned")
 	}
 	lu.logger.Debug("batched commit search completed",
 		"found_emails", len(emailFoundInCommits),
