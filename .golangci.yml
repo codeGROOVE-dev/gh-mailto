@@ -186,8 +186,6 @@ linters:
           arguments: [10]
         - name: flag-parameter # fixes are difficult
           disabled: true
-        - name: use-waitgroup-go # Standard Go pattern is fine
-          disabled: true
 
     rowserrcheck:
       # database/sql is always checked.

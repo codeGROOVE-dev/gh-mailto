@@ -113,3 +113,53 @@ fix:
 	exit $$exit_code
 
 # END: lint-install .
+
+
+# Test targets
+.PHONY: test
+test: test-coverage
+
+.PHONY: test-coverage
+test-coverage:
+	@echo "Running tests with coverage..."
+	@go test ./... -coverprofile=coverage.out -covermode=atomic -v
+	@echo "\n=== Coverage Summary ==="
+	@go tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
+	@echo "\n=== Package Coverage ==="
+	@go tool cover -func=coverage.out | grep -E "^(github.com|total)" | grep -v "\.go:" || true
+	@echo "\n=== Checking 80% threshold (pkg packages only) ==="
+	@failed=0; \
+	for pkg in $$(go list ./pkg/...); do \
+		coverage=$$(go test -coverprofile=/tmp/coverage_$$$$.out -covermode=atomic -short -timeout 30s $$pkg 2>/dev/null | grep coverage | sed 's/.*coverage: \([0-9.]*\)%.*/\1/'); \
+		if [ -n "$$coverage" ]; then \
+			result=$$(echo "$$coverage < 80" | bc -l 2>/dev/null || echo "1"); \
+			if [ "$$result" = "1" ]; then \
+				printf "❌ %-60s %6.1f%% (below 80%%)\n" "$$pkg" "$$coverage"; \
+				failed=1; \
+			else \
+				printf "✅ %-60s %6.1f%%\n" "$$pkg" "$$coverage"; \
+			fi; \
+		fi; \
+	done; \
+	rm -f /tmp/coverage_*.out; \
+	echo "\n=== CMD packages (no threshold requirement) ==="; \
+	for pkg in $$(go list ./cmd/...); do \
+		coverage=$$(go test -coverprofile=/tmp/coverage_$$$$.out -covermode=atomic -short -timeout 30s $$pkg 2>/dev/null | grep coverage | sed 's/.*coverage: \([0-9.]*\)%.*/\1/'); \
+		if [ -n "$$coverage" ]; then \
+			printf "ℹ️  %-60s %6.1f%%\n" "$$pkg" "$$coverage"; \
+		else \
+			printf "ℹ️  %-60s %6s\n" "$$pkg" "N/A"; \
+		fi; \
+	done; \
+	rm -f /tmp/coverage_*.out; \
+	if [ $$failed -eq 1 ]; then \
+		echo "\n❌ Some pkg packages are below 80% coverage threshold"; \
+		exit 1; \
+	else \
+		echo "\n✅ All pkg packages meet 80% coverage threshold"; \
+	fi
+
+.PHONY: test-html
+test-html: test-coverage
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"

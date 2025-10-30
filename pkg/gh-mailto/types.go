@@ -28,8 +28,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/shurcooL/githubv4"
-	"golang.org/x/oauth2"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -73,6 +71,7 @@ type Lookup struct {
 	currentUsername    string          // Current GitHub username being looked up
 	currentUserNames   []string        // Known names for the current user (for validation)
 	commitsLimit       int             // Number of commits to search (default: 100)
+	baseURL            string          // Base URL for GitHub API (for testing)
 }
 
 // Option configures a Lookup instance.
@@ -92,6 +91,15 @@ func WithCommitsLimit(limit int) Option {
 		if limit > 0 && limit <= 100 {
 			lu.commitsLimit = limit
 		}
+	}
+}
+
+// WithBaseURL returns an Option that sets a custom base URL for the GitHub API.
+// This is primarily useful for testing with httptest mock servers.
+// Default is "https://api.github.com".
+func WithBaseURL(baseURL string) Option {
+	return func(lu *Lookup) {
+		lu.baseURL = strings.TrimSuffix(baseURL, "/")
 	}
 }
 
@@ -190,6 +198,7 @@ func New(token string, opts ...Option) *Lookup {
 			token:        "",
 			logger:       slog.Default(),
 			commitsLimit: 100,
+			baseURL:      "https://api.github.com",
 		}
 	}
 
@@ -197,6 +206,7 @@ func New(token string, opts ...Option) *Lookup {
 		token:        token,
 		logger:       slog.Default(),
 		commitsLimit: 100, // Default to 100 commits
+		baseURL:      "https://api.github.com",
 	}
 	for _, opt := range opts {
 		opt(lu)
@@ -1374,64 +1384,97 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 		return validatedGuess
 	}
 
-	// Use GraphQL to search for the email in issues and PRs
-	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: lu.token})
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
-
-	// GraphQL query to search issues and PRs and get their content for validation
-	var query struct {
-		Search struct { //nolint:govet // GraphQL struct field alignment
-			IssueCount int
-			Edges      []struct {
-				Node struct {
-					Typename string   `graphql:"__typename"`
-					Issue    struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on Issue"`
-					PullRequest struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on PullRequest"`
-				}
-			}
-		} `graphql:"search(query: $query, type: ISSUE, first: 10)"`
-	}
+	// Build GraphQL query string directly
+	graphqlQuery := `
+query($query: String!) {
+  search(query: $query, type: ISSUE, first: 10) {
+    issueCount
+    edges {
+      node {
+        __typename
+        ... on Issue {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+        ... on PullRequest {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+      }
+    }
+  }
+}`
 
 	// Search for the email address in issues and PRs only
 	searchQuery := fmt.Sprintf(`%q type:issue,pr`, guess.Email)
-	variables := map[string]any{
-		"query": githubv4.String(searchQuery),
+
+	// Prepare GraphQL request payload
+	payload := map[string]any{
+		"query": graphqlQuery,
+		"variables": map[string]any{
+			"query": searchQuery,
+		},
 	}
 
 	lu.logger.Debug("email validation: executing GraphQL query",
 		"email", guess.Email,
 		"query", searchQuery)
 
-	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	// Execute GraphQL request
+	var response struct {
+		Data struct {
+			Search struct {
+				IssueCount int `json:"issueCount"`
+				Edges      []struct {
+					Node struct {
+						Typename   string `json:"__typename"`
+						Number     int    `json:"number"`
+						Title      string `json:"title"`
+						Body       string `json:"body"`
+						Repository struct {
+							Name  string `json:"name"`
+							Owner struct {
+								Login string `json:"login"`
+							} `json:"owner"`
+						} `json:"repository"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"search"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	graphqlURL := fmt.Sprintf("%s/graphql", lu.baseURL)
+	err := lu.doJSONPost(ctx, graphqlURL, payload, &response)
 	if err != nil {
 		lu.logger.Debug("GitHub GraphQL search failed", "email", guess.Email, "error", err)
 		return validatedGuess
 	}
 
+	if len(response.Errors) > 0 {
+		lu.logger.Debug("GraphQL returned errors", "errors", response.Errors, "query", searchQuery)
+		return validatedGuess
+	}
+
 	// Validate that the email actually appears in the content of issues/PRs
 	var issueMatches, prMatches int
-	for _, edge := range query.Search.Edges { //nolint:gocritic // Range copying acceptable for readability
+	for _, edge := range response.Data.Search.Edges {
 		node := edge.Node
 
 		var content, itemType string
@@ -1440,18 +1483,18 @@ func (lu *Lookup) searchEmailInGitHubIssuesPRs(ctx context.Context, guess Addres
 
 		switch node.Typename {
 		case "Issue":
-			content = node.Issue.Title + " " + node.Issue.Body
+			content = node.Title + " " + node.Body
 			itemType = "issue"
-			number = node.Issue.Number
-			repoOwner = node.Issue.Repository.Owner.Login
-			repoName = node.Issue.Repository.Name
+			number = node.Number
+			repoOwner = node.Repository.Owner.Login
+			repoName = node.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, number)
 		case "PullRequest":
-			content = node.PullRequest.Title + " " + node.PullRequest.Body
+			content = node.Title + " " + node.Body
 			itemType = "pr"
-			number = node.PullRequest.Number
-			repoOwner = node.PullRequest.Repository.Owner.Login
-			repoName = node.PullRequest.Repository.Name
+			number = node.Number
+			repoOwner = node.Repository.Owner.Login
+			repoName = node.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/pull/%d", repoOwner, repoName, number)
 		default:
 			continue
@@ -1572,83 +1615,116 @@ func (lu *Lookup) searchEmailInGitHub(ctx context.Context, guess Address) Addres
 	// First try GraphQL search for issues/PRs
 	validatedGuess := lu.searchEmailInGitHubIssuesPRs(ctx, guess)
 
-	// Use GraphQL to search for the email in issues and PRs
-	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: lu.token})
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
-
-	// GraphQL query to search issues and PRs and get their content for validation
-	var query struct {
-		Search struct { //nolint:govet // GraphQL struct field alignment
-			IssueCount int
-			Edges      []struct {
-				Node struct {
-					Typename string   `graphql:"__typename"`
-					Issue    struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on Issue"`
-					PullRequest struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on PullRequest"`
-				}
-			}
-		} `graphql:"search(query: $query, type: ISSUE, first: 10)"`
-	}
+	// Build GraphQL query string directly
+	graphqlQuery := `
+query($query: String!) {
+  search(query: $query, type: ISSUE, first: 10) {
+    issueCount
+    edges {
+      node {
+        __typename
+        ... on Issue {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+        ... on PullRequest {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+      }
+    }
+  }
+}`
 
 	// Search for the email address in issues and PRs only
 	// Commits are not supported in GitHub's search API with GraphQL
 	searchQuery := fmt.Sprintf(`%q type:issue,pr`, guess.Email)
-	variables := map[string]any{
-		"query": githubv4.String(searchQuery),
+
+	// Prepare GraphQL request payload
+	payload := map[string]any{
+		"query": graphqlQuery,
+		"variables": map[string]any{
+			"query": searchQuery,
+		},
 	}
 
 	lu.logger.Debug("email validation: executing GraphQL query",
 		"email", guess.Email,
 		"query", searchQuery)
 
-	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	// Execute GraphQL request
+	var response struct {
+		Data struct {
+			Search struct {
+				IssueCount int `json:"issueCount"`
+				Edges      []struct {
+					Node struct {
+						Typename   string `json:"__typename"`
+						Number     int    `json:"number"`
+						Title      string `json:"title"`
+						Body       string `json:"body"`
+						Repository struct {
+							Name  string `json:"name"`
+							Owner struct {
+								Login string `json:"login"`
+							} `json:"owner"`
+						} `json:"repository"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"search"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	graphqlURL := fmt.Sprintf("%s/graphql", lu.baseURL)
+	err := lu.doJSONPost(ctx, graphqlURL, payload, &response)
 	if err != nil {
 		lu.logger.Debug("GitHub GraphQL search failed", "email", guess.Email, "error", err)
 		return validatedGuess
 	}
 
+	if len(response.Errors) > 0 {
+		lu.logger.Debug("GraphQL returned errors", "errors", response.Errors, "query", searchQuery)
+		return validatedGuess
+	}
+
 	// Validate that the email actually appears in the content of issues/PRs
 	var issueMatches, prMatches int
-	for _, edge := range query.Search.Edges { //nolint:gocritic // Range copying acceptable for readability
+	for _, edge := range response.Data.Search.Edges {
 		node := edge.Node
 		var content, itemType, repoOwner, repoName, itemURL string
 		var number int
 
 		switch node.Typename {
 		case "Issue":
-			content = node.Issue.Title + " " + node.Issue.Body
+			content = node.Title + " " + node.Body
 			itemType = "issue"
-			number = node.Issue.Number
-			repoOwner = node.Issue.Repository.Owner.Login
-			repoName = node.Issue.Repository.Name
+			number = node.Number
+			repoOwner = node.Repository.Owner.Login
+			repoName = node.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", repoOwner, repoName, number)
 		case "PullRequest":
-			content = node.PullRequest.Title + " " + node.PullRequest.Body
+			content = node.Title + " " + node.Body
 			itemType = "pr"
-			number = node.PullRequest.Number
-			repoOwner = node.PullRequest.Repository.Owner.Login
-			repoName = node.PullRequest.Repository.Name
+			number = node.Number
+			repoOwner = node.Repository.Owner.Login
+			repoName = node.Repository.Name
 			itemURL = fmt.Sprintf("https://github.com/%s/%s/pull/%d", repoOwner, repoName, number)
 		default:
 			continue
@@ -1909,52 +1985,84 @@ func (lu *Lookup) batchedGraphQLSearch(ctx context.Context, emails []string) map
 func (lu *Lookup) executeBatchedGraphQLQuery(ctx context.Context, searchQuery string, emails []string) map[string]Address {
 	results := make(map[string]Address)
 
-	// Use GraphQL to search for the emails in issues and PRs
-	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: lu.token})
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
+	// Build GraphQL query string directly
+	graphqlQuery := `
+query($query: String!) {
+  search(query: $query, type: ISSUE, first: 30) {
+    issueCount
+    edges {
+      node {
+        __typename
+        ... on Issue {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+        ... on PullRequest {
+          number
+          title
+          body
+          repository {
+            name
+            owner {
+              login
+            }
+          }
+        }
+      }
+    }
+  }
+}`
 
-	// GraphQL query to search issues and PRs
-	var query struct {
-		Search struct { //nolint:govet // GraphQL struct field alignment
-			IssueCount int
-			Edges      []struct {
-				Node struct {
-					Typename string   `graphql:"__typename"`
-					Issue    struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on Issue"`
-					PullRequest struct { //nolint:govet // GraphQL struct field alignment
-						Number     int
-						Title      string
-						Body       string
-						Repository struct {
-							Name  string
-							Owner struct {
-								Login string
-							}
-						}
-					} `graphql:"... on PullRequest"`
-				}
-			}
-		} `graphql:"search(query: $query, type: ISSUE, first: 30)"` // Increased limit for batched search
+	// Prepare GraphQL request payload
+	payload := map[string]any{
+		"query": graphqlQuery,
+		"variables": map[string]any{
+			"query": searchQuery,
+		},
 	}
 
-	variables := map[string]any{
-		"query": githubv4.String(searchQuery),
+	// Execute GraphQL request
+	var response struct {
+		Data struct {
+			Search struct {
+				IssueCount int `json:"issueCount"`
+				Edges      []struct {
+					Node struct {
+						Typename   string `json:"__typename"`
+						Number     int    `json:"number"`
+						Title      string `json:"title"`
+						Body       string `json:"body"`
+						Repository struct {
+							Name  string `json:"name"`
+							Owner struct {
+								Login string `json:"login"`
+							} `json:"owner"`
+						} `json:"repository"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"search"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 
-	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	graphqlURL := fmt.Sprintf("%s/graphql", lu.baseURL)
+	err := lu.doJSONPost(ctx, graphqlURL, payload, &response)
 	if err != nil {
 		lu.logger.Debug("batched GraphQL search failed", "error", err, "query", searchQuery)
+		return results
+	}
+
+	if len(response.Errors) > 0 {
+		lu.logger.Debug("GraphQL returned errors", "errors", response.Errors, "query", searchQuery)
 		return results
 	}
 
@@ -1973,16 +2081,16 @@ func (lu *Lookup) executeBatchedGraphQLQuery(ctx context.Context, searchQuery st
 	}
 
 	// Process search results
-	for _, edge := range query.Search.Edges { //nolint:gocritic // Range copying acceptable for readability
+	for _, edge := range response.Data.Search.Edges {
 		node := edge.Node
 
 		var content, itemType string
 		switch node.Typename {
 		case "Issue":
-			content = node.Issue.Title + " " + node.Issue.Body
+			content = node.Title + " " + node.Body
 			itemType = "issue"
 		case "PullRequest":
-			content = node.PullRequest.Title + " " + node.PullRequest.Body
+			content = node.Title + " " + node.Body
 			itemType = "pr"
 		default:
 			continue

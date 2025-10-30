@@ -7,9 +7,6 @@ import (
 	"net/url"
 	"sync"
 	"time"
-
-	"github.com/shurcooL/githubv4"
-	"golang.org/x/oauth2"
 )
 
 // OrgIdentityCache caches all user identities for an organization.
@@ -162,47 +159,83 @@ func (s *OrgCacheService) buildOrgCache(ctx context.Context, organization string
 
 // fetchAllSAMLIdentities fetches all SAML identities for the organization.
 func (s *OrgCacheService) fetchAllSAMLIdentities(ctx context.Context, organization string) ([]OrgIdentity, error) {
-	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: s.lookup.token})
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
-
 	var identities []OrgIdentity
-	var cursor *githubv4.String
+	var cursor *string
+
+	graphqlURL := fmt.Sprintf("%s/graphql", s.lookup.baseURL)
 
 	for {
-		var query struct {
-			Organization struct {
-				SamlIdentityProvider struct {
-					ExternalIdentities struct {
-						Nodes []struct {
-							User struct {
-								Login string
-								Name  string
-							}
-							SamlIdentity struct {
-								NameID string
-							}
-						}
-						PageInfo struct {
-							HasNextPage bool
-							EndCursor   githubv4.String
-						}
-					} `graphql:"externalIdentities(first: 100, after: $cursor)"`
-				}
-			} `graphql:"organization(login: $org)"`
+		// Build GraphQL query string directly
+		graphqlQuery := `
+query($org: String!, $cursor: String) {
+  organization(login: $org) {
+    samlIdentityProvider {
+      externalIdentities(first: 100, after: $cursor) {
+        nodes {
+          user {
+            login
+            name
+          }
+          samlIdentity {
+            nameId
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`
+
+		// Prepare GraphQL request payload
+		payload := map[string]any{
+			"query": graphqlQuery,
+			"variables": map[string]any{
+				"org":    organization,
+				"cursor": cursor,
+			},
 		}
 
-		variables := map[string]any{
-			"org":    githubv4.String(organization),
-			"cursor": cursor,
+		// Execute GraphQL request
+		var response struct {
+			Data struct {
+				Organization struct {
+					SamlIdentityProvider struct {
+						ExternalIdentities struct {
+							Nodes []struct {
+								User struct {
+									Login string `json:"login"`
+									Name  string `json:"name"`
+								} `json:"user"`
+								SamlIdentity struct {
+									NameID string `json:"nameId"`
+								} `json:"samlIdentity"`
+							} `json:"nodes"`
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+						} `json:"externalIdentities"`
+					} `json:"samlIdentityProvider"`
+				} `json:"organization"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
 		}
 
-		err := s.lookup.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+		err := s.lookup.doJSONPost(ctx, graphqlURL, payload, &response)
 		if err != nil {
 			return identities, err
 		}
 
-		for _, node := range query.Organization.SamlIdentityProvider.ExternalIdentities.Nodes {
+		if len(response.Errors) > 0 {
+			return identities, fmt.Errorf("GraphQL errors: %v", response.Errors)
+		}
+
+		for _, node := range response.Data.Organization.SamlIdentityProvider.ExternalIdentities.Nodes {
 			if node.SamlIdentity.NameID != "" && isValidEmail(node.SamlIdentity.NameID) {
 				identities = append(identities, OrgIdentity{
 					GitHubUsername: node.User.Login,
@@ -214,10 +247,11 @@ func (s *OrgCacheService) fetchAllSAMLIdentities(ctx context.Context, organizati
 			}
 		}
 
-		if !query.Organization.SamlIdentityProvider.ExternalIdentities.PageInfo.HasNextPage {
+		if !response.Data.Organization.SamlIdentityProvider.ExternalIdentities.PageInfo.HasNextPage {
 			break
 		}
-		cursor = &query.Organization.SamlIdentityProvider.ExternalIdentities.PageInfo.EndCursor
+		endCursor := response.Data.Organization.SamlIdentityProvider.ExternalIdentities.PageInfo.EndCursor
+		cursor = &endCursor
 	}
 
 	slog.Debug("fetched SAML identities",
@@ -235,11 +269,8 @@ func (s *OrgCacheService) fetchAllVerifiedDomainIdentities(ctx context.Context, 
 		return nil, err
 	}
 
-	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: s.lookup.token})
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
-
 	var identities []OrgIdentity
+	graphqlURL := fmt.Sprintf("%s/graphql", s.lookup.baseURL)
 
 	// Batch process members (GitHub allows up to 100 nodes in a single GraphQL query)
 	batchSize := 50 // Conservative batch size
@@ -253,20 +284,40 @@ func (s *OrgCacheService) fetchAllVerifiedDomainIdentities(ctx context.Context, 
 		// Build GraphQL query with aliases for each user
 		// This is complex, so we'll do individual queries for now (can optimize later)
 		for _, username := range batch {
-			var query struct {
-				User struct {
-					Login                            string
-					Name                             string
-					OrganizationVerifiedDomainEmails []string `graphql:"organizationVerifiedDomainEmails(login: $org)"`
-				} `graphql:"user(login: $username)"`
+			// Build GraphQL query string directly
+			graphqlQuery := `
+query($username: String!, $org: String!) {
+  user(login: $username) {
+    login
+    name
+    organizationVerifiedDomainEmails(login: $org)
+  }
+}`
+
+			// Prepare GraphQL request payload
+			payload := map[string]any{
+				"query": graphqlQuery,
+				"variables": map[string]any{
+					"username": username,
+					"org":      organization,
+				},
 			}
 
-			variables := map[string]any{
-				"username": githubv4.String(username),
-				"org":      githubv4.String(organization),
+			// Execute GraphQL request
+			var response struct {
+				Data struct {
+					User struct {
+						Login                            string   `json:"login"`
+						Name                             string   `json:"name"`
+						OrganizationVerifiedDomainEmails []string `json:"organizationVerifiedDomainEmails"`
+					} `json:"user"`
+				} `json:"data"`
+				Errors []struct {
+					Message string `json:"message"`
+				} `json:"errors"`
 			}
 
-			err := s.lookup.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+			err := s.lookup.doJSONPost(ctx, graphqlURL, payload, &response)
 			if err != nil {
 				slog.Debug("failed to fetch verified emails for user",
 					"username", username,
@@ -274,11 +325,18 @@ func (s *OrgCacheService) fetchAllVerifiedDomainIdentities(ctx context.Context, 
 				continue
 			}
 
-			if len(query.User.OrganizationVerifiedDomainEmails) > 0 {
+			if len(response.Errors) > 0 {
+				slog.Debug("GraphQL errors for user",
+					"username", username,
+					"errors", response.Errors)
+				continue
+			}
+
+			if len(response.Data.User.OrganizationVerifiedDomainEmails) > 0 {
 				identities = append(identities, OrgIdentity{
 					GitHubUsername: username,
-					Emails:         query.User.OrganizationVerifiedDomainEmails,
-					PrimaryEmail:   query.User.OrganizationVerifiedDomainEmails[0],
+					Emails:         response.Data.User.OrganizationVerifiedDomainEmails,
+					PrimaryEmail:   response.Data.User.OrganizationVerifiedDomainEmails[0],
 					Source:         "verified_domain",
 					Verified:       true,
 				})
@@ -309,7 +367,7 @@ func (s *OrgCacheService) fetchAllMemberPublicEmails(ctx context.Context, organi
 			Name  string `json:"name"`
 		}
 
-		apiURL := fmt.Sprintf("https://api.github.com/users/%s", url.PathEscape(username))
+		apiURL := fmt.Sprintf("%s/users/%s", s.lookup.baseURL, url.PathEscape(username))
 		if err := s.lookup.doJSONRequestWithAccept(ctx, apiURL, nil, &user, "application/vnd.github.v3+json"); err != nil {
 			slog.Debug("failed to fetch public profile for user",
 				"username", username,
@@ -342,8 +400,8 @@ func (s *OrgCacheService) fetchAllOrgMembers(ctx context.Context, organization s
 	perPage := 100
 
 	for {
-		membersURL := fmt.Sprintf("https://api.github.com/orgs/%s/members?page=%d&per_page=%d",
-			url.PathEscape(organization), page, perPage)
+		membersURL := fmt.Sprintf("%s/orgs/%s/members?page=%d&per_page=%d",
+			s.lookup.baseURL, url.PathEscape(organization), page, perPage)
 
 		var pageMembers []struct {
 			Login string `json:"login"`

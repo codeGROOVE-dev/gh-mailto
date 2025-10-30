@@ -116,39 +116,96 @@ func (lu *Lookup) doJSONRequestWithAccept(ctx context.Context, url string, body 
 	return nil
 }
 
-// doGraphQLQueryWithRetry performs a GraphQL query with retry logic for reliability.
-func (lu *Lookup) doGraphQLQueryWithRetry(ctx context.Context, client interface {
-	Query(ctx context.Context, q any, variables map[string]any) error
-}, query any, variables map[string]any,
-) error {
-	return retry.Do(
+// doJSONPost performs a POST request with JSON body and decodes the JSON response.
+func (lu *Lookup) doJSONPost(ctx context.Context, url string, payload any, result any) error {
+	// Marshal payload to JSON
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling request body: %w", err)
+	}
+
+	var bodyReader io.Reader
+
+	var finalResp *http.Response
+	retryErr := retry.Do(
 		func() error {
-			err := client.Query(ctx, query, variables)
-			if err != nil {
-				errStr := strings.ToLower(err.Error())
-				// Check if it's a rate limit error that should be retried
-				if strings.Contains(errStr, "rate limit") ||
-					strings.Contains(errStr, "rate_limit") ||
-					strings.Contains(errStr, "timeout") ||
-					strings.Contains(errStr, "connection") ||
-					strings.Contains(errStr, "temporary") ||
-					strings.Contains(errStr, "server error") ||
-					strings.Contains(errStr, "502") ||
-					strings.Contains(errStr, "503") ||
-					strings.Contains(errStr, "504") {
-					lu.logger.Debug("GraphQL query failed with retryable error", "error", err)
-					return err // Retry
-				}
-				// Non-retryable errors (e.g., authentication, syntax errors)
-				lu.logger.Debug("GraphQL query failed with non-retryable error", "error", err)
-				return retry.Unrecoverable(err)
+			// Create fresh reader for each retry
+			bodyReader = strings.NewReader(string(jsonBytes))
+
+			req, reqErr := http.NewRequestWithContext(ctx, "POST", url, bodyReader)
+			if reqErr != nil {
+				return retry.Unrecoverable(fmt.Errorf("creating request: %w", reqErr))
 			}
+
+			req.Header.Set("Authorization", "Bearer "+lu.token)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("User-Agent", "gh-mailto/1.0")
+
+			resp, httpErr := httpClient.Do(req)
+			if httpErr != nil {
+				lu.logger.Debug("HTTP POST failed, will retry", "error", httpErr, "url", url)
+				return fmt.Errorf("executing request: %w", httpErr)
+			}
+
+			// Retry on server errors (5xx) and rate limiting (429)
+			if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					lu.logger.Debug("failed to close response body", "error", closeErr)
+				}
+				lu.logger.Debug("HTTP error, will retry", "status", resp.StatusCode, "url", url)
+				return fmt.Errorf("HTTP %d error", resp.StatusCode)
+			}
+
+			finalResp = resp
 			return nil
 		},
 		retry.Attempts(5),
-		retry.Delay(200*time.Millisecond),
+		retry.Delay(100*time.Millisecond),
 		retry.MaxDelay(2*time.Minute),
 		retry.DelayType(retry.FullJitterBackoffDelay),
 		retry.Context(ctx),
 	)
+	if retryErr != nil {
+		return retryErr
+	}
+
+	defer func() {
+		// Drain and close body to reuse connection
+		_, _ = io.Copy(io.Discard, finalResp.Body) //nolint:errcheck // Best effort cleanup
+		_ = finalResp.Body.Close()                 //nolint:errcheck // Best effort cleanup
+	}()
+
+	if finalResp.StatusCode != http.StatusOK {
+		bodyBytes, err := io.ReadAll(io.LimitReader(finalResp.Body, maxErrorBodySize))
+		if err != nil {
+			return fmt.Errorf("HTTP %d: failed to read error response", finalResp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d: %s", finalResp.StatusCode, string(bodyBytes))
+	}
+
+	// Read the response body with size limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(finalResp.Body, maxResponseBodySize))
+	if err != nil {
+		return fmt.Errorf("reading response body: %w", err)
+	}
+
+	// Check if we hit the limit
+	if len(bodyBytes) == maxResponseBodySize {
+		return fmt.Errorf("response body too large (>%d bytes)", maxResponseBodySize)
+	}
+
+	// Log response metadata only - never log response body for security
+	lu.logger.Debug("API response received",
+		"method", "POST",
+		"url", url,
+		"status", finalResp.StatusCode,
+		"content_length", len(bodyBytes),
+	)
+
+	if err := json.Unmarshal(bodyBytes, result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	return nil
 }

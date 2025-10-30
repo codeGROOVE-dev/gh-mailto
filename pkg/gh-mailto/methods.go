@@ -8,9 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/shurcooL/githubv4"
-	"golang.org/x/oauth2"
 )
 
 const (
@@ -30,7 +27,7 @@ func (lu *Lookup) lookupViaPublicAPI(ctx context.Context, username, _ string) ([
 		Name  string `json:"name"`
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/users/%s", url.PathEscape(username))
+	apiURL := fmt.Sprintf("%s/users/%s", lu.baseURL, url.PathEscape(username))
 	lu.logger.Debug("making public API request", "url", apiURL)
 	if err := lu.doJSONRequestWithAccept(ctx, apiURL, nil, &user, "application/vnd.github.v3+json"); err != nil {
 		lu.logger.Warn("public API request failed", "error", err, "username", username)
@@ -81,12 +78,12 @@ func (lu *Lookup) lookupViaCommits(ctx context.Context, username, organization s
 	var searchURL string
 	if organization != "" {
 		// Use GitHub search commits API to find user's commits in the organization directly
-		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=org:%s+author:%s&sort=committer-date&order=desc&per_page=%d",
-			url.QueryEscape(organization), url.QueryEscape(username), lu.commitsLimit)
+		searchURL = fmt.Sprintf("%s/search/commits?q=org:%s+author:%s&sort=committer-date&order=desc&per_page=%d",
+			lu.baseURL, url.QueryEscape(organization), url.QueryEscape(username), lu.commitsLimit)
 	} else {
 		// Search user's public commits across all repositories
-		searchURL = fmt.Sprintf("https://api.github.com/search/commits?q=author:%s&sort=committer-date&order=desc&per_page=%d",
-			url.QueryEscape(username), lu.commitsLimit)
+		searchURL = fmt.Sprintf("%s/search/commits?q=author:%s&sort=committer-date&order=desc&per_page=%d",
+			lu.baseURL, url.QueryEscape(username), lu.commitsLimit)
 	}
 
 	var searchResult struct {
@@ -194,39 +191,68 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 		"organization", organization,
 	)
 
-	src := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: lu.token},
-	)
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
+	// Build GraphQL query string directly
+	graphqlQuery := `
+query($org: String!, $username: String!, $limit: Int!) {
+  organization(login: $org) {
+    samlIdentityProvider {
+      externalIdentities(first: $limit, login: $username) {
+        nodes {
+          user {
+            login
+            name
+          }
+          samlIdentity {
+            nameId
+          }
+        }
+      }
+    }
+  }
+}`
 
-	var query struct {
-		Organization struct {
-			SamlIdentityProvider struct {
-				ExternalIdentities struct {
-					Nodes []struct {
-						User struct {
-							Login string
-							Name  string
-						}
-						SamlIdentity struct {
-							NameID string
-						}
-					}
-				} `graphql:"externalIdentities(first: $limit, login: $username)"`
-			}
-		} `graphql:"organization(login: $org)"`
+	// Prepare GraphQL request payload
+	payload := map[string]any{
+		"query": graphqlQuery,
+		"variables": map[string]any{
+			"org":      organization,
+			"username": username,
+			"limit":    100,
+		},
 	}
 
-	variables := map[string]any{
-		"org":      githubv4.String(organization),
-		"username": githubv4.String(username),
-		"limit":    githubv4.Int(100),
+	// Execute GraphQL request
+	var response struct {
+		Data struct {
+			Organization struct {
+				SamlIdentityProvider struct {
+					ExternalIdentities struct {
+						Nodes []struct {
+							User struct {
+								Login string `json:"login"`
+								Name  string `json:"name"`
+							} `json:"user"`
+							SamlIdentity struct {
+								NameID string `json:"nameId"`
+							} `json:"samlIdentity"`
+						} `json:"nodes"`
+					} `json:"externalIdentities"`
+				} `json:"samlIdentityProvider"`
+			} `json:"organization"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 
-	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	graphqlURL := fmt.Sprintf("%s/graphql", lu.baseURL)
+	err := lu.doJSONPost(ctx, graphqlURL, payload, &response)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(response.Errors) > 0 {
+		return nil, fmt.Errorf("GraphQL errors: %v", response.Errors)
 	}
 
 	// Log response metadata only - never log detailed response for security
@@ -236,7 +262,7 @@ func (lu *Lookup) lookupViaSAMLIdentity(ctx context.Context, username, organizat
 	)
 
 	var addresses []Address
-	for _, node := range query.Organization.SamlIdentityProvider.ExternalIdentities.Nodes {
+	for _, node := range response.Data.Organization.SamlIdentityProvider.ExternalIdentities.Nodes {
 		if node.User.Login == username && isValidEmail(node.SamlIdentity.NameID) {
 			addresses = append(addresses, Address{
 				Email:    node.SamlIdentity.NameID,
@@ -261,27 +287,45 @@ func (lu *Lookup) lookupViaOrgVerifiedDomains(ctx context.Context, username, org
 		"organization", organization,
 	)
 
-	src := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: lu.token},
-	)
-	httpClient := oauth2.NewClient(ctx, src)
-	client := githubv4.NewClient(httpClient)
+	// Build GraphQL query string directly
+	graphqlQuery := `
+query($username: String!, $org: String!) {
+  user(login: $username) {
+    name
+    organizationVerifiedDomainEmails(login: $org)
+  }
+}`
 
-	var query struct {
-		User struct {
-			Name                             string   `graphql:"name"`
-			OrganizationVerifiedDomainEmails []string `graphql:"organizationVerifiedDomainEmails(login: $org)"`
-		} `graphql:"user(login: $username)"`
+	// Prepare GraphQL request payload
+	payload := map[string]any{
+		"query": graphqlQuery,
+		"variables": map[string]any{
+			"username": username,
+			"org":      organization,
+		},
 	}
 
-	variables := map[string]any{
-		"username": githubv4.String(username),
-		"org":      githubv4.String(organization),
+	// Execute GraphQL request
+	var response struct {
+		Data struct {
+			User struct {
+				Name                             string   `json:"name"`
+				OrganizationVerifiedDomainEmails []string `json:"organizationVerifiedDomainEmails"`
+			} `json:"user"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 
-	err := lu.doGraphQLQueryWithRetry(ctx, client, &query, variables)
+	graphqlURL := fmt.Sprintf("%s/graphql", lu.baseURL)
+	err := lu.doJSONPost(ctx, graphqlURL, payload, &response)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(response.Errors) > 0 {
+		return nil, fmt.Errorf("GraphQL errors: %v", response.Errors)
 	}
 
 	// Log response metadata only - never log detailed response for security
@@ -291,11 +335,11 @@ func (lu *Lookup) lookupViaOrgVerifiedDomains(ctx context.Context, username, org
 	)
 
 	var addresses []Address
-	for _, email := range query.User.OrganizationVerifiedDomainEmails {
+	for _, email := range response.Data.User.OrganizationVerifiedDomainEmails {
 		if isValidEmail(email) {
 			addresses = append(addresses, Address{
 				Email:    email,
-				Name:     query.User.Name,
+				Name:     response.Data.User.Name,
 				Verified: true,
 				Methods:  []string{methodOrgDomains},
 			})
@@ -318,7 +362,7 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 
 	// This requires admin access to the org
 	// First check if user is a member
-	memberURL := fmt.Sprintf("https://api.github.com/orgs/%s/members/%s", url.PathEscape(organization), url.PathEscape(username))
+	memberURL := fmt.Sprintf("%s/orgs/%s/members/%s", lu.baseURL, url.PathEscape(organization), url.PathEscape(username))
 	resp, err := lu.doRequestWithAccept(ctx, "GET", memberURL, nil, "application/vnd.github.v3+json")
 	if err != nil {
 		return nil, fmt.Errorf("checking membership: %w", err)
@@ -331,7 +375,7 @@ func (lu *Lookup) lookupViaOrgMembers(ctx context.Context, username, organizatio
 	}
 
 	// Try to get member details with email
-	membersURL := fmt.Sprintf("https://api.github.com/orgs/%s/members", url.PathEscape(organization))
+	membersURL := fmt.Sprintf("%s/orgs/%s/members", lu.baseURL, url.PathEscape(organization))
 	var members []struct {
 		Login string `json:"login"`
 		Email string `json:"email"`
@@ -388,8 +432,8 @@ func (lu *Lookup) searchCombinedCommits(
 	}
 
 	query := strings.Join(queryParts, " OR ")
-	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&sort=committer-date&order=desc&per_page=%d",
-		url.QueryEscape(query), lu.commitsLimit)
+	searchURL := fmt.Sprintf("%s/search/commits?q=%s&sort=committer-date&order=desc&per_page=%d",
+		lu.baseURL, url.QueryEscape(query), lu.commitsLimit)
 
 	lu.logger.Debug("combined commit search", "query", query, "url", searchURL)
 
@@ -492,8 +536,8 @@ func (lu *Lookup) searchCombinedCommits(
 // Also returns organization information for found commits.
 func (lu *Lookup) searchEmailInCommits(ctx context.Context, email string) (found bool, orgs []string) { //nolint:unused // Used by searchEmailInGitHub
 	// Use GitHub search API to find commits containing the specific email (quoted to prevent GitHub interpretation)
-	searchURL := fmt.Sprintf("https://api.github.com/search/commits?q=%s&per_page=%d",
-		url.QueryEscape(`"`+email+`"`), lu.commitsLimit)
+	searchURL := fmt.Sprintf("%s/search/commits?q=%s&per_page=%d",
+		lu.baseURL, url.QueryEscape(`"`+email+`"`), lu.commitsLimit)
 
 	var searchResult struct {
 		Items []struct {
