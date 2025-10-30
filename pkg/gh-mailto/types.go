@@ -669,7 +669,7 @@ func (lu *Lookup) Guess(ctx context.Context, username, organization string, opts
 
 	// Validate ONLY the generated guesses against GitHub issues and PRs
 	// (Do not search for arbitrary domain emails - that leads to unrelated coworkers being returned)
-	validatedGuesses := lu.validateGuessesWithGitHub(ctx, guesses)
+	validatedGuesses := lu.validateGuessesWithGitHub(ctx, guesses, username)
 	guessResult.Guesses = validatedGuesses
 
 	duration := time.Since(start)
@@ -1169,12 +1169,12 @@ func calculateConfidenceAndPattern(methods []string, verified bool, sources map[
 }
 
 // validateGuessesWithGitHub validates email guesses by searching GitHub issues and PRs.
-func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Address) []Address {
+func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Address, username string) []Address {
 	if len(guesses) == 0 {
 		return guesses
 	}
 
-	lu.logger.Debug("validating guesses with GitHub (batched)", "count", len(guesses))
+	lu.logger.Debug("validating guesses with GitHub (batched)", "count", len(guesses), "username", username)
 
 	var validatedGuesses []Address
 	var unvalidatedGuesses []Address
@@ -1199,7 +1199,7 @@ func (lu *Lookup) validateGuessesWithGitHub(ctx context.Context, guesses []Addre
 
 		// Note: searchCombinedCommits logs errors internally and returns empty results on failure
 		// We continue processing to provide degraded service rather than failing completely
-		chunkResults, _, _ := lu.searchCombinedCommits(ctx, lu.currentUsername, "", chunk)
+		chunkResults, _, _ := lu.searchCombinedCommits(ctx, username, "", chunk)
 		if len(chunkResults) == 0 && len(chunk) > 0 {
 			commitSearchFailed = true
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	ghmailto "github.com/codeGROOVE-dev/gh-mailto/pkg/gh-mailto"
@@ -50,8 +51,8 @@ func main() {
 
 func run() error {
 	var (
-		username     = flag.String("user", "", "GitHub username")
-		org          = flag.String("org", "", "GitHub organization")
+		username     = flag.String("user", "", "GitHub username (optional if --org is specified)")
+		org          = flag.String("org", "", "GitHub organization (required when --user is omitted)")
 		domain       = flag.String("domain", "", "Only include email addresses for this domain (e.g., stromberg.org)")
 		guess        = flag.Bool("guess", false, "Guess email address for the domain specified by --domain (requires --user, --org, and --domain)")
 		verbose      = flag.Bool("verbose", false, "Enable verbose logging to show queries and results from each method")
@@ -59,10 +60,12 @@ func run() error {
 	)
 	flag.Parse()
 
-	if *username == "" {
+	// Determine mode: if --user is provided, do user lookup; if --org only, list org
+	if *username == "" && *org == "" {
 		fmt.Fprintf(os.Stderr, "Usage: %s --user <username> [--org <organization>]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "   or: %s --org <organization> [--domain <domain>] (list all org users)\n", os.Args[0])
 		flag.PrintDefaults()
-		return errors.New("missing required arguments")
+		return errors.New("must provide either --user or --org")
 	}
 
 	// Basic input validation to prevent injection attacks
@@ -114,6 +117,21 @@ func run() error {
 		ghmailto.WithLogger(logger),
 		ghmailto.WithCommitsLimit(*commitsLimit),
 	)
+
+	// Handle org-list mode (--org without --user)
+	if *username == "" && *org != "" {
+		fmt.Fprintf(os.Stderr, "Fetching all users in %s...\n\n", *org)
+
+		orgCache := ghmailto.NewOrgCacheService(token)
+		cache, err := orgCache.OrgCache(ctx, *org)
+		if err != nil {
+			logger.Error("failed to fetch org cache", "error", err)
+			return err
+		}
+
+		printOrgList(cache, *domain, *guess, lookup, ctx, *org)
+		return nil
+	}
 
 	// Handle guess mode
 	if *guess {
@@ -478,4 +496,246 @@ func printGuessResults(result *ghmailto.GuessResult, _, _, domain string) {
 
 		fmt.Print("\n")
 	}
+}
+
+// printOrgList displays all users in an organization with their highest confidence email.
+func printOrgList(cache *ghmailto.OrgIdentityCache, domainFilter string, shouldGuess bool, lookup *ghmailto.Lookup, ctx context.Context, org string) {
+	if len(cache.Identities) == 0 {
+		fmt.Printf("%sNo users found in organization%s\n", colorDim, colorReset)
+		return
+	}
+
+	// Print header
+	fmt.Printf("%sFound %d users in %s%s%s%s:\n\n",
+		colorDim, len(cache.Identities),
+		colorBrightMagenta, cache.Organization, colorDim, colorReset)
+
+	// Helper function to check if email matches domain filter
+	emailMatchesDomain := func(email, domain string) bool {
+		if domain == "" {
+			return true // No filter, all emails match
+		}
+		emailParts := strings.Split(email, "@")
+		if len(emailParts) < 2 {
+			return false
+		}
+		return strings.EqualFold(emailParts[1], domain)
+	}
+
+	// If guessing is enabled, collect users who need guessing in parallel
+	type guessTask struct {
+		identity ghmailto.OrgIdentity
+		index    int
+	}
+
+	var tasksToGuess []guessTask
+	var results []struct {
+		index    int
+		username string
+		email    string
+		confidence int
+		sourceText string
+		patternText string
+		hasGuess bool
+	}
+
+	// First pass: identify who needs guessing
+	for i, identity := range cache.Identities {
+		needsGuess := false
+
+		if shouldGuess && domainFilter != "" && lookup != nil {
+			// Need to guess if:
+			// 1. No email at all, OR
+			// 2. Has email but it doesn't match the target domain
+			if identity.PrimaryEmail == "" {
+				needsGuess = true
+			} else if !emailMatchesDomain(identity.PrimaryEmail, domainFilter) {
+				needsGuess = true
+			}
+		}
+
+		if needsGuess {
+			tasksToGuess = append(tasksToGuess, guessTask{identity: identity, index: i})
+		}
+	}
+
+	// Perform guesses in parallel if there are any
+	if len(tasksToGuess) > 0 {
+		fmt.Fprintf(os.Stderr, "%sGuessing emails for %d users...%s\n", colorDim, len(tasksToGuess), colorReset)
+
+		type guessResult struct {
+			index    int
+			username string
+			guessResult *ghmailto.GuessResult
+			err      error
+		}
+
+		resultsChan := make(chan guessResult, len(tasksToGuess))
+		var wg sync.WaitGroup
+
+		// Limit parallelism to avoid rate limiting
+		// Set to 1 for sequential processing to avoid hitting GitHub rate limits
+		semaphore := make(chan struct{}, 1)
+
+		for _, task := range tasksToGuess {
+			wg.Add(1)
+			go func(t guessTask) {
+				defer wg.Done()
+				semaphore <- struct{}{}        // Acquire
+				defer func() { <-semaphore }() // Release
+
+				guessRes, err := lookup.Guess(ctx, t.identity.GitHubUsername, org, ghmailto.GuessOptions{
+					Domain: domainFilter,
+				})
+				resultsChan <- guessResult{
+					index:       t.index,
+					username:    t.identity.GitHubUsername,
+					guessResult: guessRes,
+					err:         err,
+				}
+			}(task)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultsChan)
+		}()
+
+		// Collect results
+		guessMap := make(map[int]guessResult)
+		for res := range resultsChan {
+			guessMap[res.index] = res
+		}
+
+		// Convert to display format
+		for idx, res := range guessMap {
+			if res.err == nil && res.guessResult != nil && len(res.guessResult.Guesses) > 0 {
+				topGuess := res.guessResult.Guesses[0]
+				sourceText := extractSourceText(topGuess)
+				patternText := formatPattern(topGuess.Pattern)
+
+				results = append(results, struct {
+					index       int
+					username    string
+					email       string
+					confidence  int
+					sourceText  string
+					patternText string
+					hasGuess    bool
+				}{
+					index:       idx,
+					username:    res.username,
+					email:       topGuess.Email,
+					confidence:  topGuess.Confidence,
+					sourceText:  sourceText,
+					patternText: patternText,
+					hasGuess:    true,
+				})
+			}
+		}
+	}
+
+	// Create a map for quick lookup of guess results by index
+	guessResultMap := make(map[int]struct {
+		email       string
+		confidence  int
+		sourceText  string
+		patternText string
+	})
+	for _, r := range results {
+		guessResultMap[r.index] = struct {
+			email       string
+			confidence  int
+			sourceText  string
+			patternText string
+		}{
+			email:       r.email,
+			confidence:  r.confidence,
+			sourceText:  r.sourceText,
+			patternText: r.patternText,
+		}
+	}
+
+	// Second pass: print results
+	guessCount := 0
+	for i, identity := range cache.Identities {
+		// Check if we have a guess for this user
+		if guessRes, hasGuess := guessResultMap[i]; hasGuess {
+			guessCount++
+			fmt.Printf("• %d%% - %s%-20s%s → %s%s%s %s(%s)%s",
+				guessRes.confidence,
+				colorBrightBlue, identity.GitHubUsername, colorReset,
+				colorBold+colorWhite, guessRes.email, colorReset,
+				colorDim, guessRes.sourceText, colorReset)
+
+			if guessRes.patternText != "" {
+				fmt.Printf(" %s[%s]%s", colorDim, guessRes.patternText, colorReset)
+			}
+			fmt.Print("\n")
+			continue
+		}
+
+		// Skip if domain filter specified and doesn't match
+		if domainFilter != "" && identity.PrimaryEmail != "" {
+			if !emailMatchesDomain(identity.PrimaryEmail, domainFilter) {
+				continue
+			}
+		}
+
+		// Determine confidence based on source
+		confidence := 85
+		if identity.Verified {
+			confidence = 95
+		}
+
+		// Format source
+		sourceText := formatSourceText(identity.Source, identity.Verified)
+
+		if identity.PrimaryEmail != "" {
+			fmt.Printf("• %d%% - %s%-20s%s → %s%s%s %s(%s)%s\n",
+				confidence,
+				colorBrightBlue, identity.GitHubUsername, colorReset,
+				colorBold+colorWhite, identity.PrimaryEmail, colorReset,
+				colorDim, sourceText, colorReset)
+		} else {
+			// Only show "no email" if not guessing or domain filter not specified
+			if !shouldGuess || domainFilter == "" {
+				fmt.Printf("• %s%-20s%s %s(no email)%s\n",
+					colorBrightBlue, identity.GitHubUsername, colorReset,
+					colorDim, colorReset)
+			}
+		}
+	}
+
+	fmt.Printf("\n%sStatistics:%s\n", colorDim, colorReset)
+	fmt.Printf("  • Total members: %d\n", cache.TotalMembers)
+	fmt.Printf("  • SAML identities: %d\n", cache.SAMLCount)
+	fmt.Printf("  • Verified domains: %d\n", cache.VerifiedCount)
+	fmt.Printf("  • Public emails: %d\n", cache.PublicEmailCount)
+	if guessCount > 0 {
+		fmt.Printf("  • Guessed emails: %d\n", guessCount)
+	}
+	fmt.Println()
+}
+
+// formatSourceText formats the identity source for display.
+func formatSourceText(source string, verified bool) string {
+	var sourceDisplay string
+	switch source {
+	case "saml":
+		sourceDisplay = "SAML"
+	case "verified_domain":
+		sourceDisplay = "Verified Domain"
+	case "public_profile":
+		sourceDisplay = "Public Profile"
+	case "org_member":
+		sourceDisplay = "Org Member"
+	default:
+		sourceDisplay = source
+	}
+
+	if verified {
+		return fmt.Sprintf("%s ✓", sourceDisplay)
+	}
+	return sourceDisplay
 }
